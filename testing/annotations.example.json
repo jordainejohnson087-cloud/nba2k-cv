@@ -1,0 +1,7 @@
+{
+  "frames": [
+    {"frame": 0, "meter": false},
+    {"frame": 1, "meter": true, "shot_id": "example-1", "box": [100, 100, 120, 160], "fill": 0.15},
+    {"frame": 2, "meter": true, "shot_id": "example-1", "box": [100, 100, 120, 160], "fill": 0.25}
+  ]
+}

@@ -1,0 +1,48 @@
+name: Publish desktop update
+on:
+  push:
+    tags:
+      - 'v*'
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install test dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Verify tests
+        run: python -m unittest discover -s testing -v
+      - name: Build and verify update
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          version = json.loads(Path('app_version.json').read_text())['version']
+          if os.environ['RELEASE_TAG'] != f'v{version}':
+              raise SystemExit('Tag must equal v plus app_version.json version')
+          PY
+          python scripts/build_release.py --repository "$REPOSITORY" --out NBA2K_CV_Update.zip
+          python testing/make_update_manifest.py --archive NBA2K_CV_Update.zip --download-url "https://github.com/$REPOSITORY/releases/latest/download/NBA2K_CV_Update.zip" --out update.json
+          python - <<'PY'
+          import json, zipfile
+          from pathlib import Path
+          from app_update import ALLOWED
+          archive = Path('NBA2K_CV_Update.zip')
+          manifest = json.loads(Path('update.json').read_text())
+          with zipfile.ZipFile(archive) as z:
+              assert set(z.namelist()) == ALLOWED
+              assert json.loads(z.read('app_version.json'))['version'] == manifest['version']
+          PY
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release create "$RELEASE_TAG" NBA2K_CV_Update.zip update.json --verify-tag --title "$RELEASE_TAG" --notes 'NBA2K CV desktop update'
