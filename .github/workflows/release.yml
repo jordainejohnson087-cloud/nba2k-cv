@@ -45,4 +45,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
-        run: gh release create "$RELEASE_TAG" NBA2K_CV_Update.zip update.json --verify-tag --title "$RELEASE_TAG" --notes 'NBA2K CV desktop update'
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" NBA2K_CV_Update.zip update.json --clobber
+          else
+            gh release create "$RELEASE_TAG" NBA2K_CV_Update.zip update.json --verify-tag --title "$RELEASE_TAG" --notes 'NBA2K CV desktop update'
+          fi
