@@ -1,4 +1,5 @@
 .venv/
+models/
 __pycache__/
 *.py[cod]
 test_results/

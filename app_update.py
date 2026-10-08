@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 
 ROOT_FILES = {
-    'app.py','app_update.py','app_version.json','README.md','requirements.txt',
+    'app.py','app_update.py','app_model.py','app_version.json','README.md','requirements.txt',
     'run_live.py','run_video.py','meter_core.py','Launch NBA2K CV.bat',
     'update_source.json',
 }
@@ -20,6 +20,7 @@ TEST_FILES = {
     'testing/self_check.py','testing/test_self_check.py',
     'testing/make_update_manifest.py',
     'testing/check_capture.py','testing/test_core.py','testing/test_live.py',
+    'testing/test_app_model.py',
     'testing/test_learning_loop.py','testing/test_app_update.py',
     'testing/annotations.example.json',
 }

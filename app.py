@@ -13,6 +13,7 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 from app_update import (apply_update, configured_feed, current_version,
                         download_release, fetch_manifest, newest_download)
+from app_model import import_model, managed_model
 
 
 PROJECT=Path(__file__).resolve().parent
@@ -25,9 +26,11 @@ def load_settings():
 
 
 def discover_model(project=PROJECT, downloads=None, deep=False):
-    """Prefer a model used in earlier successful runs, then known Downloads layouts."""
+    """Prefer the managed model, then previous runs and known Downloads layouts."""
     project=Path(project)
     downloads=Path(downloads) if downloads else Path.home()/'Downloads'
+    local=managed_model(project)
+    if local.is_file():return local
     reports=sorted((project/'test_results').rglob('live_run.json'),
                    key=lambda p:p.stat().st_mtime,reverse=True) if (project/'test_results').exists() else []
     for report in reports:
@@ -61,6 +64,7 @@ class Desktop(tk.Tk):
         self.geometry('1000x740')
         self.minsize(820,600)
         self.process=None
+        self.importing_model=False
         self.messages=queue.Queue()
         saved=load_settings()
         saved_model=Path(saved.get('model','')) if saved.get('model') else None
@@ -97,6 +101,7 @@ class Desktop(tk.Tk):
         ttk.Entry(model_row,textvariable=self.model).pack(side='left',fill='x',expand=True)
         ttk.Button(model_row,text='Auto Find',command=self._auto_find).pack(side='left',padx=4)
         ttk.Button(model_row,text='Browse',command=self._choose_model).pack(side='left',padx=4)
+        ttk.Button(model_row,text='Import to App',command=self._import_model).pack(side='left',padx=4)
         self._row(live,'Capture source',self.source)
         mode=ttk.Frame(live);mode.pack(fill='x',pady=5)
         for title,var in [('Width',self.width),('Height',self.height),('Capture FPS',self.fps),
@@ -172,6 +177,19 @@ class Desktop(tk.Tk):
         else:
             messagebox.showinfo('Model not found','No best.pt was found in prior run logs or Downloads. Paste its full path in the model field.')
 
+    def _import_model(self):
+        if self._busy() or self.importing_model:return
+        initial=Path(self.model.get()).parent if Path(self.model.get()).is_file() else Path.home()/'Downloads'
+        chosen=filedialog.askopenfilename(parent=self,title='Import trained model into app',
+            initialdir=str(initial),filetypes=[('PyTorch weights','*.pt')])
+        if not chosen:return
+        self.importing_model=True
+        self.status.set('Importing model into app...')
+        def work():
+            try:self.messages.put(('model_imported',import_model(chosen,PROJECT)))
+            except Exception as exc:self.messages.put(('model_error',str(exc)))
+        threading.Thread(target=work,daemon=True).start()
+
     def _choose_dir(self,var):
         path=filedialog.askdirectory(title='Choose labeled run folder')
         if path:var.set(path)
@@ -201,6 +219,9 @@ class Desktop(tk.Tk):
         return out
 
     def _busy(self):
+        if self.importing_model:
+            messagebox.showinfo('Model import active','Wait for the model copy to finish first.')
+            return True
         if self.process and self.process.poll() is None:
             messagebox.showinfo('Already running','Stop or finish the current run first.')
             return True
@@ -290,6 +311,15 @@ class Desktop(tk.Tk):
                     else:self.update_status.set('You have the latest version.')
                 elif kind=='update_error':
                     self.update_status.set(f'Update check failed: {value}')
+                elif kind=='model_imported':
+                    self.importing_model=False
+                    self.model.set(str(value));self._save()
+                    self.status.set(f'Model ready in app: {value}')
+                    messagebox.showinfo('Model imported','The model is stored in the app folder. Run Check Setup before live detection.')
+                elif kind=='model_error':
+                    self.importing_model=False
+                    self.status.set('Model import failed')
+                    messagebox.showerror('Model import failed',value)
                 elif kind=='downloaded':
                     self._finish_update(value)
                 else:
@@ -368,6 +398,8 @@ class Desktop(tk.Tk):
         self.destroy()
 
     def _update_local(self):
+        if self.importing_model:
+            messagebox.showinfo('Model import active','Wait for the model copy to finish first.');return
         if self.process and self.process.poll() is None:
             messagebox.showinfo('Run active','Finish the current run before updating.');return
         archive=newest_download(Path.home()/'Downloads',PROJECT)
@@ -381,6 +413,8 @@ class Desktop(tk.Tk):
         self._finish_update(archive)
 
     def _close(self):
+        if self.importing_model:
+            messagebox.showinfo('Model import active','Wait for the model copy to finish first.');return
         if self.process and self.process.poll() is None:
             if not messagebox.askyesno('Run active','Stop the current test and close?'):return
             self.process.terminate()
