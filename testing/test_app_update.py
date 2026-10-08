@@ -18,12 +18,14 @@ class UpdateTests(unittest.TestCase):
     def test_release_contains_only_code_and_live_feed(self):
         with tempfile.TemporaryDirectory() as root:
             archive=Path(root)/'release.zip'
+            source=Path(__file__).resolve().parents[1]/'update_source.json'
+            original=source.read_bytes()
             version,feed=build(archive,'example/nba2k-cv')
             with zipfile.ZipFile(archive) as z:
                 self.assertEqual(set(z.namelist()),app_update.ALLOWED)
                 self.assertEqual(json.loads(z.read('update_source.json'))['manifest_url'],feed)
                 self.assertEqual(json.loads(z.read('app_version.json'))['version'],version)
-            self.assertEqual(json.loads((Path(__file__).resolve().parents[1]/'update_source.json').read_text())['manifest_url'],'')
+            self.assertEqual(source.read_bytes(),original)
 
     def test_online_release_download_checks_hash_before_install(self):
         with tempfile.TemporaryDirectory() as root:
