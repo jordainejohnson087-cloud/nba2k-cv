@@ -1,0 +1,39 @@
+name: Windows app validation
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/windows-validation.yml'
+      - 'app.py'
+      - 'app_model.py'
+      - 'app_update.py'
+      - 'run_live.py'
+      - 'run_video.py'
+      - 'meter_core.py'
+      - 'requirements.txt'
+      - 'testing/**'
+      - 'Launch NBA2K CV.bat'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Create app environment
+        shell: pwsh
+        run: python -m venv .venv
+      - name: Install app dependencies
+        shell: pwsh
+        run: .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+      - name: Run unit and integration tests
+        shell: pwsh
+        run: .\.venv\Scripts\python.exe -m unittest discover -s testing -v
+      - name: Start Windows GUI and inspect tabs
+        shell: pwsh
+        run: .\.venv\Scripts\python.exe testing\windows_smoke.py
