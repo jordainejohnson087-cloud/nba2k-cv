@@ -32,6 +32,13 @@ class LearningLoopTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'every captured frame'):
                 load_labels(run,complete=True)
 
+    def test_sampled_live_run_cannot_claim_exhaustive_validation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            (root/'reviewed_labels.json').write_text(json.dumps({'frames':[]}))
+            (root/'live_run.json').write_text(json.dumps({'skipped_inference_frames':1}))
+            with self.assertRaisesRegex(ValueError,'every source frame'):load_labels(root,complete=True)
+
     def test_training_run_cannot_overlap_held_out_test(self):
         with tempfile.TemporaryDirectory() as root:
             train=Path(root)/'train'; val=Path(root)/'val'

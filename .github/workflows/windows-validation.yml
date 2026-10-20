@@ -7,6 +7,8 @@ on:
       - 'scripts/**'
       - 'meter_green.py'
       - 'live_link.py'
+      - 'capture_pipe.py'
+      - 'titan_control.py'
       - 'bridge/**'
       - 'app.py'
       - 'app_model.py'

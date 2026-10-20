@@ -55,6 +55,7 @@ class GCVWorker:
         self.session = None
         self.device_sequence = None
         self.device_event = None
+        self.active_slot = None
 
     def process(self, frame):
         import gtuner
@@ -66,8 +67,9 @@ class GCVWorker:
                 if text.startswith('T2CV:'):
                     parts=text[5:].strip().split(':')
                     counter = int(parts[0])
-                    if len(parts)==3:
+                    if len(parts) in (3,4):
                         self.device_sequence=int(parts[1]);self.device_event=int(parts[2])
+                    self.active_slot=int(parts[3]) if len(parts)==4 and 1<=int(parts[3])<=9 else None
                     if counter != self.hardware_counter:
                         self.hardware_counter = counter
                         self.last_hardware = now
@@ -96,7 +98,7 @@ class GCVWorker:
                 self.packet = packet
                 self.last_packet = now
                 ack = dict(session=packet['session'],seq=packet['seq'],
-                    hardware_counter=self.hardware_counter,device_sequence=self.device_sequence,device_event=self.device_event,
+                    hardware_counter=self.hardware_counter,active_slot=self.active_slot,device_sequence=self.device_sequence,device_event=self.device_event,
                     hardware_age_ms=(now-self.last_hardware)*1000 if self.last_hardware is not None else None)
                 self.socket.sendto(json.dumps(ack).encode(),peer)
             except (ValueError,TypeError,AttributeError,OverflowError):

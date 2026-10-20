@@ -91,5 +91,5 @@ main {
 }
 combo Heartbeat {
     wait(500);
-    printf("GCMD:ComputerVision.PY:T2CV:%d:%d:%d", heartbeat_counter++, packet_seq, fired_event);
+    printf("GCMD:ComputerVision.PY:T2CV:%d:%d:%d:%d", heartbeat_counter++, packet_seq, fired_event, mslot_get());
 }

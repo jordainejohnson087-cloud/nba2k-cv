@@ -30,7 +30,9 @@ def main():
             if not required.issubset(names):
                 raise AssertionError(f'Missing app tabs: {required - set(names)}')
             # Startup notification is nonmodal, persistent in the banner, and shown once per version.
-            release={'version':2026102005}
+            from app_update import current_version
+            import app as app_module
+            release={'version':current_version(app_module.PROJECT)+1}
             app._handle_release(release);app.update()
             first_notice=app.update_notice
             assert first_notice is not None and first_notice.winfo_exists()
@@ -106,12 +108,35 @@ def main():
                          cv2,np.zeros((100,200,3),dtype=np.uint8))
                 app._preview_tick()
                 assert app.preview_image is not None
-                assert '59.0 processed FPS' in app.live_metrics.get()
+                assert 'AI 59.0 FPS' in app.live_metrics.get()
                 fake=type('Process',(),{'poll':lambda self:None})()
                 app.process=fake
                 app._stop()
                 assert (out/'stop.request').is_file()
                 app.process=None
+                from capture_pipe import RawMailbox
+                with_raw=RawMailbox(out/'live_bgr.bin',write=True)
+                try:
+                    with_raw.publish(np.zeros((100,200,3),dtype=np.uint8),cv2,17,time.time())
+                    app._display_tick()
+                    assert app.raw_preview_sequence==1
+                    assert 'Direct card BGR' in app.display_metrics.get()
+                finally:
+                    app._close_raw_preview();with_raw.close()
+                app.render_mode.set('Resolution')
+                with patch.object(app,'_save'):app._render_preset()
+                assert app.display_fps.get()=='60'
+                app.render_mode.set('Performance')
+                with patch.object(app,'_save'):app._render_preset()
+                assert app.display_fps.get()=='120'
+                app.capture_type.set('Media Foundation / YUY2')
+                assert app._capture_mode()==('msmf','YUY2')
+                app._show_slots({1:'NBA2K CV Meter Bridge'},1)
+                assert app.slot_table.item('1','values')[0]=='NBA2K CV Meter Bridge'
+                assert app.slot_table.item('1','values')[1]=='Active — heartbeat verified'
+                app._show_slots(None,None)
+                assert app.slot_table.item('1','values')[1]=='Not verified'
+
         finally:
             app.destroy()
 

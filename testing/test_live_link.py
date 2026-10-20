@@ -171,3 +171,31 @@ class BridgePreflightTests(unittest.TestCase):
                     result=client.probe(timeout=.2,sleep=lambda delay:ticks.__setitem__(0,ticks[0]+delay))
                 self.assertFalse(result['ready'])
             finally:client.close()
+
+
+class SlotEvidenceTests(unittest.TestCase):
+    def test_preflight_rejects_wrong_slot_even_with_payload_echo(self):
+        client=BridgeClient(26740);ticks=[0.0];client.clock=lambda:ticks[0]
+        def wrong(state):
+            client.seq+=1
+            return dict(receiver='receiving',hardware='heartbeat verified',device_sequence=client.seq,active_slot=3)
+        try:
+            with patch.object(client,'send',side_effect=wrong):
+                result=client.probe(timeout=.2,expected_slot=4,sleep=lambda delay:ticks.__setitem__(0,ticks[0]+delay))
+            self.assertFalse(result['ready'])
+            ticks[0]=0
+            def correct(state):return dict(wrong(state),active_slot=4)
+            with patch.object(client,'send',side_effect=correct):
+                self.assertTrue(client.probe(expected_slot=4)['ready'])
+        finally:client.close()
+
+    def test_worker_reports_slot_from_gpc_and_clears_it_for_old_script(self):
+        with patch.object(gcv,'PORT',0):worker=gcv.GCVWorker(1,1)
+        try:
+            gtuner=SimpleNamespace(gpc_string=lambda:b'T2CV:1:42:0:4')
+            with patch.dict(sys.modules,{'gtuner':gtuner}):worker.process(None)
+            self.assertEqual(worker.active_slot,4)
+            gtuner.gpc_string=lambda:b'T2CV:2:43:0'
+            with patch.dict(sys.modules,{'gtuner':gtuner}):worker.process(None)
+            self.assertIsNone(worker.active_slot)
+        finally:worker.socket.close()

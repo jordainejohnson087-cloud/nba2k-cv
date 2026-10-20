@@ -82,6 +82,7 @@ class BridgeClient:
         self.pending = {}
         self.hardware_counter = None
         self.device_sequence = self.device_event = None
+        self.active_slot = None
 
     def send(self, state, observed_at=None):
         now = self.clock()
@@ -120,6 +121,8 @@ class BridgeClient:
                         and 0 <= age <= 1500 and counter != self.hardware_counter):
                     self.hardware_counter = counter
                     self.last_hardware = now-age/1000
+                    slot=ack.get('active_slot')
+                    self.active_slot=slot if type(slot) is int and 1<=slot<=9 else None
                     for key in ('device_sequence','device_event'):
                         value=ack.get(key)
                         if type(value) is int and 0<=value<=0xffffffff:setattr(self,key,value)
@@ -133,11 +136,12 @@ class BridgeClient:
         hardware = linked and self.last_hardware is not None and now-self.last_hardware < 1.5
         return dict(receiver='receiving' if linked else 'waiting for Gtuner',
                     hardware='heartbeat verified' if hardware else 'not verified',
+                    active_slot=self.active_slot if hardware else None,
                     rtt_ms=self.rtt_ms, sent=self.sent, acknowledged=self.acked,
                     device_sequence=self.device_sequence if hardware else None,
                     device_event=self.device_event if hardware else None)
 
-    def probe(self, timeout=5, sleep=time.sleep):
+    def probe(self, timeout=5, sleep=time.sleep, expected_slot=None):
         """Verify a v2 payload echo using an unarmed challenge before capture opens."""
         self.seq=secrets.randbelow(0x7fffffff)+1
         first=self.seq+1
@@ -150,7 +154,8 @@ class BridgeClient:
             status=self.send(neutral)
             sequence=status.get('device_sequence')
             if (status['hardware']=='heartbeat verified' and type(sequence) is int
-                    and first<=sequence<=self.seq):
+                    and first<=sequence<=self.seq
+                    and (expected_slot is None or status.get('active_slot')==expected_slot)):
                 return dict(status,ready=True)
             sleep(.05)
         return dict(status,ready=False)

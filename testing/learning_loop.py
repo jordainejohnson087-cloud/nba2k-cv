@@ -89,6 +89,10 @@ def review_run(run_dir, limit=120, extract_raw=True):
 def load_labels(run_dir, complete=False):
     run_dir=Path(run_dir)
     labels=json.loads((run_dir/'reviewed_labels.json').read_text(encoding='utf-8'))
+    if complete and (run_dir/'live_run.json').is_file():
+        report=json.loads((run_dir/'live_run.json').read_text(encoding='utf-8'))
+        if report.get('skipped_inference_frames',0):
+            raise ValueError('Validation needs every source frame; this low-latency run skipped inference frames. Use a sequential validation capture.')
     with (run_dir/'live_frames.csv').open(newline='',encoding='utf-8') as file:
         total=sum(1 for _ in csv.DictReader(file))
     anns=labels['frames']

@@ -13,13 +13,17 @@ from pathlib import Path
 from meter_core import Config, Detection, MeterTracker
 from run_video import estimate_fill
 from live_link import BridgeClient, SnapshotPublisher, atomic_write
+from titan_control import GtunerController, slot_number, choose_meter_slot
+from capture_pipe import LatestCapture, RawMailbox
 from meter_green import GreenGate, green_config, measure_green
 
 
-def open_capture(cv2, source, windows_dshow=False):
+def open_capture(cv2, source, windows_dshow=False, backend="auto"):
     index = int(source) if source.isdecimal() else source
-    if isinstance(index, int) and windows_dshow:
-        return cv2.VideoCapture(index, cv2.CAP_DSHOW)
+    if isinstance(index,int) and (windows_dshow or backend=="dshow"):
+        return cv2.VideoCapture(index,cv2.CAP_DSHOW)
+    if isinstance(index,int) and backend=="msmf":
+        return cv2.VideoCapture(index,cv2.CAP_MSMF)
     return cv2.VideoCapture(index)
 
 
@@ -40,7 +44,7 @@ def configure_capture(cv2, cap, args):
 
 def probe_capture(args, cv2, clock=time.perf_counter):
     """Measure capture delivery without loading the model or rendering UI."""
-    cap = open_capture(cv2,str(args.source),args.dshow)
+    cap = open_capture(cv2,str(args.source),args.dshow,getattr(args,"backend","auto"))
     if not cap.isOpened():
         raise RuntimeError(f'Cannot open capture source {args.source}')
     try:
@@ -133,7 +137,7 @@ class WallClockRecorder:
 
 def run(args, cv2, torch, YOLO):
     source = str(args.source)
-    cap = open_capture(cv2, source, args.dshow)
+    cap = open_capture(cv2, source, args.dshow,getattr(args,"backend","auto"))
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open capture source {source}; check its device index and that another app is not using it")
     mode = configure_capture(cv2,cap,args)
@@ -166,6 +170,33 @@ def run(args, cv2, torch, YOLO):
     bridge_status = None
     ui_enabled = getattr(args, 'ui_preview', False)
     publisher = SnapshotPublisher(args.out, cv2) if getattr(args,'ui_status',False) else None
+    direct=getattr(args,'live_direct',False)
+    display_fps=getattr(args,'display_fps',60)
+    display_width,display_height=((1280,720) if getattr(args,'render_mode','performance')=='performance' else (1920,1080))
+    mailbox=RawMailbox(args.out/'live_bgr.bin',write=True) if direct and ui_enabled else None
+    display_state={'last':0.0,'error':None}
+    def publish_raw(sample):
+        settings_path=getattr(args,'display_settings',None)
+        if settings_path and sample['read_at']-display_state.get('settings_checked',0)>.5:
+            display_state['settings_checked']=sample['read_at']
+            try:
+                settings=json.loads(settings_path.read_text())
+                if settings.get('fps') in (15,30,60,120,240) and settings.get('mode') in ('performance','resolution'):
+                    display_state['fps']=settings['fps'];display_state['mode']=settings['mode']
+            except (OSError,ValueError):pass
+        target_fps=display_state.get('fps',display_fps)
+        target_width,target_height=((1280,720) if display_state.get('mode',getattr(args,'render_mode','performance'))=='performance' else (1920,1080))
+        if mailbox and sample['read_at']+.0005>=display_state.get('next',0):
+            try:
+                mailbox.publish(sample['frame'],cv2,sample['source_frame'],sample['captured_at'],target_width,target_height)
+                previous=display_state.get('next',sample['read_at'])
+                display_state['next']=max(previous+1/target_fps,sample['read_at']+1/target_fps-.001)
+                display_state['last']=sample['read_at']
+            except Exception as exc:display_state['error']=str(exc)
+    pump=None
+    source_frame=-1
+    skipped_frames=0
+    capture_reader_stopped=True
     last_snapshot = 0
     stop_file = getattr(args, 'stop_file', None)
     green_path = getattr(args,'green_settings',None)
@@ -175,13 +206,15 @@ def run(args, cv2, torch, YOLO):
     trigger_events = 0
     green_log = (args.out/'green_frames.jsonl').open('w',encoding='utf-8')
     start = time.perf_counter()
+    pump=LatestCapture(cap,publish_raw) if direct else None
+    skip_log=(args.out/'capture_skips.jsonl').open('w',encoding='utf-8')
     last_read = None
     csv_path = args.out/'live_frames.csv'
     try:
         with csv_path.open('w',newline='',encoding='utf-8') as file:
             fieldnames = ['frame','elapsed_sec','shot_id','status','confidence','x1','y1','x2','y2',
                           'fill','stop_candidate','read_interval_ms','read_ms','raw_write_ms',
-                          'inference_ms','overlay_ms','preview_write_ms','loop_ms']
+                          'inference_ms','overlay_ms','preview_write_ms','loop_ms','source_frame','skipped_before']
             log = csv.DictWriter(file,fieldnames=fieldnames)
             log.writeheader()
             while True:
@@ -192,14 +225,33 @@ def run(args, cv2, torch, YOLO):
                 if args.seconds and time.perf_counter()-start >= args.seconds:
                     reason = 'time_limit'; break
                 read_start = time.perf_counter()
-                ok, frame = cap.read()
-                read_at = time.perf_counter()
-                captured_at = time.time()
-                read_ms = (read_at-read_start)*1000
+                previous_source=source_frame
+                if pump:
+                    sample=pump.next(source_frame)
+                    if sample is None:
+                        if pump.finished:
+                            missing_reads=pump.failures
+                            reason='capture_error' if pump.error else 'source_ended_or_disconnected'
+                            break
+                        continue
+                    frame=sample['frame'];source_frame=sample['source_frame']
+                    read_at=sample['read_at'];captured_at=sample['captured_at'];read_ms=sample['read_ms']
+                else:
+                    ok,frame=cap.read();read_at=time.perf_counter();captured_at=time.time()
+                    read_ms=(read_at-read_start)*1000
+                    if not ok or frame is None:
+                        missing_reads+=1;reason='source_ended_or_disconnected';break
+                    source_frame+=1
                 stage_times['read_ms'].append(read_ms)
-                if not ok or frame is None:
-                    missing_reads += 1
-                    reason = 'source_ended_or_disconnected'; break
+                skipped=source_frame-previous_source-1
+                if skipped:
+                    skipped_frames+=skipped
+                    skip_log.write(json.dumps(dict(first=previous_source+1,last=source_frame-1,count=skipped))+'\n')
+                    # Unknown source frames cannot support a plateau or green confirmation.
+                    gate.consecutive=0;gate.approaching=False
+                    for missing in range(previous_source+1,source_frame):
+                        gap=tracker.update(missing,[])
+                        if gap['ended']:shots.append(gap['ended'])
                 if frame.ndim != 3 or frame.shape[2] != 3:
                     raise RuntimeError(f'Unexpected capture frame shape at frame {count}: {frame.shape}')
                 if frame_size is None:
@@ -231,7 +283,7 @@ def run(args, cv2, torch, YOLO):
                 def read_fill(box):
                     raw_fill[0]=estimate_fill(frame,box,args.fill_top,args.fill_bottom)
                     return raw_fill[0]
-                state = tracker.update(count,detections,read_fill)
+                state = tracker.update(source_frame,detections,read_fill)
                 if green_path and green_path.stat().st_mtime_ns!=green_stamp:
                     updated=green_config(json.loads(green_path.read_text()))
                     gate.configure(updated)
@@ -244,7 +296,12 @@ def run(args, cv2, torch, YOLO):
                 trigger_events+=int(state['trigger']['candidate'])
                 green_log.write(json.dumps(dict(frame=count,elapsed_sec=read_at-start,                    shot_id=state['shot_id'],status=state['status'],measurement=measurement,                    trigger=state['trigger']))+'\n')
                 if bridge is not None:
-                    bridge_status = bridge.send(state, observed_at=captured_at)
+                    bridge_state=state
+                    expected=getattr(args,'expected_slot',None)
+                    prior=bridge.status()
+                    if prior['hardware']!='heartbeat verified' or (expected and prior.get('active_slot')!=expected):
+                        bridge_state=dict(state,trigger=dict(state['trigger'],armed=False,eligible=False))
+                    bridge_status = bridge.send(bridge_state, observed_at=captured_at)
                 if state['ended']:
                     shots.append(state['ended'])
                 stop_requested = False
@@ -252,7 +309,7 @@ def run(args, cv2, torch, YOLO):
                 if not args.headless or args.record or (getattr(args,'ui_status',False) and read_at-last_snapshot >= .1):
                     overlay_start = time.perf_counter()
                     overlay = (draw_preview(cv2,frame,state,count,inference_ms,budget_ms)
-                               if not args.headless or args.record or ui_enabled else None)
+                               if not args.headless or args.record or (ui_enabled and not direct) else None)
                     overlay_ms = (time.perf_counter()-overlay_start)*1000
                     if args.record:
                         preview_start = time.perf_counter()
@@ -265,7 +322,11 @@ def run(args, cv2, torch, YOLO):
                         publisher.submit(dict(timestamp=captured_at, frame=count,
                             elapsed_sec=read_at-start, fps=count/max(.001,read_at-start),
                             inference_ms=inference_ms, device=str(device),
-                            status=state['status'], fill=state['fill'], bridge=bridge_status, green=measurement, trigger=state['trigger']), overlay if ui_enabled else None)
+                            status=state['status'], fill=state['fill'], box=state['box'], source_frame=source_frame,
+                            capture_fps=(pump.frames/max(.001,read_at-start) if pump else count/max(.001,read_at-start)),
+                            capture_frames=pump.frames if pump else count+1,skipped_inference_frames=skipped_frames,
+                            reported_capture=mode,preview_source='direct BGR' if direct else 'analyzed PNG',
+                            bridge=bridge_status, green=measurement, trigger=state['trigger']), overlay if ui_enabled and not direct else None)
                         last_snapshot = read_at
                     if not args.headless:
                         cv2.imshow('NBA 2K meter detection (Q to stop)',overlay)
@@ -282,14 +343,23 @@ def run(args, cv2, torch, YOLO):
                     x1=box[0],y1=box[1],x2=box[2],y2=box[3],fill=state['fill'],
                     stop_candidate=state['stop_candidate'],read_interval_ms=interval_ms,
                     read_ms=read_ms,raw_write_ms=raw_write_ms,inference_ms=inference_ms,
-                    overlay_ms=overlay_ms,preview_write_ms=preview_write_ms,loop_ms=loop_ms))
+                    overlay_ms=overlay_ms,preview_write_ms=preview_write_ms,loop_ms=loop_ms,
+                    source_frame=source_frame,skipped_before=skipped))
                 count += 1
                 if count % 60 == 0:
                     file.flush()
                 if stop_requested:
                     reason = 'user_stopped'; break
     finally:
-        cap.release()
+        if pump:
+            capture_reader_stopped=pump.close()
+            trailing=pump.frames-source_frame-1
+            if trailing>0:
+                skipped_frames+=trailing
+                skip_log.write(json.dumps(dict(first=source_frame+1,last=pump.frames-1,count=trailing))+'\n')
+        else:cap.release()
+        if mailbox:mailbox.close()
+        skip_log.close()
         green_log.close()
         if bridge is not None:
             bridge.close()
@@ -306,6 +376,13 @@ def run(args, cv2, torch, YOLO):
     elapsed = time.perf_counter()-start
     report = dict(source=source,model=str(args.model),device=str(device),frames=count,
         bridge=bridge_status, ui_preview=ui_enabled,
+        capture_backend=getattr(args,'backend','auto'),live_direct=direct,
+        display_fps_requested=display_fps,render_mode=getattr(args,'render_mode','performance'),
+        capture_frames=pump.frames if pump else count,skipped_inference_frames=skipped_frames,
+        capture_reader_stopped=capture_reader_stopped,capture_error=pump.error if pump else None,
+        direct_preview_error=display_state['error'],
+        capture_read_fps=(pump.frames/elapsed if pump and elapsed else count/elapsed if elapsed else 0),
+        capture_interval_p95_ms=(sorted(pump.intervals)[int(.95*(len(pump.intervals)-1))] if pump and pump.intervals else None),
         preview_error=publisher.error if publisher else None,
         green_settings=gate.config,green_candidate_events=trigger_events,
         elapsed_sec=elapsed,measured_fps=count/elapsed if elapsed else 0,
@@ -319,7 +396,7 @@ def run(args, cv2, torch, YOLO):
         recording_fps=writer_video.fps if writer_video is not None else None,
         recording_frames=writer_video.frames if writer_video is not None else None,
         raw_capture_frames=count if raw_writer is not None else None,
-        realtime_target_met=over_budget == 0 and late_reads == 0,
+        realtime_target_met=over_budget == 0 and late_reads == 0 and skipped_frames==0,
         shots_full_at_first_detection=sum(s['first_full_frame'] == s['start_frame']
                                           for s in shots if s['first_full_frame'] is not None),
         performance_warning=('CPU inference could not keep up with the source; test CUDA or a smaller '
@@ -333,7 +410,7 @@ def run(args, cv2, torch, YOLO):
         report['review_queue'] = review_run(args.out,extract_raw=args.record_raw)
         (args.out/'live_run.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
     print(json.dumps(report,indent=2))
-    if reason == 'source_ended_or_disconnected' and source.isdecimal():
+    if reason in ('source_ended_or_disconnected','capture_error') and source.isdecimal():
         raise RuntimeError('Live capture stopped unexpectedly; inspect live_run.json')
     return report
 
@@ -360,8 +437,14 @@ def main():
     p.add_argument('--green-settings',type=Path,help='Adjustable green calibration and trigger settings JSON')
     p.add_argument('--device',choices=['auto','0','cpu'],default='auto',help='Auto, CUDA GPU 0, or CPU')
     p.add_argument('--ui-status',action='store_true',help='Publish live status to the desktop app')
-    p.add_argument('--ui-preview',action='store_true',help='Write a bounded 640px app preview at up to 10 FPS')
+    p.add_argument('--ui-preview',action='store_true',help='Show capture in the desktop app')
+    p.add_argument('--live-direct',action='store_true',help='Read card on its own thread and publish raw BGR independently of inference')
+    p.add_argument('--backend',choices=['auto','dshow','msmf'],default='auto')
+    p.add_argument('--display-fps',type=int,choices=[15,30,60,120,240],default=60)
+    p.add_argument('--display-settings',type=Path,help='Live display pacing settings JSON')
+    p.add_argument('--render-mode',choices=['performance','resolution'],default='performance')
     p.add_argument('--stop-file',type=Path,help='Stop gracefully when this file appears')
+    p.add_argument('--expected-slot',type=int,choices=range(1,10),help='Require this slot heartbeat before forwarding armed output')
     p.add_argument('--bridge-port',type=int,default=0,help='Optional localhost Gtuner receiver port; 0 disables')
     p.add_argument('--headless',action='store_true',help='Log results without a preview window')
     p.add_argument('--record',action='store_true',help='Save an annotated MP4')
@@ -371,6 +454,8 @@ def main():
     args.ui_status = args.ui_status or args.ui_preview
     if not 0 <= args.bridge_port <= 65535:
         p.error('Invalid bridge port')
+    if args.live_direct and Path(args.source).is_file():
+        p.error('Direct mode is for a live device or stream; use run_video.py for exhaustive video validation.')
     if not args.probe_only and (args.model is None or not args.model.is_file()):
         p.error(f'Model not found: {args.model}')
     if not 0 < args.conf < 1 or args.imgsz <= 0 or args.max_missed < 0 or args.max_frames < 0 or args.seconds < 0:

@@ -11,7 +11,7 @@ if not exist ".venv\Scripts\python.exe" (
   py -3 -m venv .venv
   if errorlevel 1 goto setup_failed
 )
-".venv\Scripts\python.exe" -c "import cv2, torch, ultralytics" >nul 2>&1
+".venv\Scripts\python.exe" -c "import cv2, torch, ultralytics, pywinauto, psutil" >nul 2>&1
 if errorlevel 1 (
   echo Installing detection dependencies. This may take several minutes...
   ".venv\Scripts\python.exe" -m pip install -r requirements.txt

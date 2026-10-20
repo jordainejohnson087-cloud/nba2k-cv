@@ -180,3 +180,31 @@ Select `Gtuner.exe` in the Titan Two tab and enable automatic Gtuner startup. Wi
 One-time hardware setup: install `titan_meter.gpc` to an unused slot in Gtuner IV, select it, and enable **Recall loaded memory slot between power cycles** under Device Configuration. Start `gtuner_meter.py` in Gtuner Computer Vision, using a Null or separate display source rather than the app's capture card. Source updates still require reinstalling the GPC through Gtuner. The app's GPC remains uncompiled and untested on physical Titan Two hardware here.
 
 **Prepare / Check Bridge** sends unarmed, absent-meter v2 packets for up to five seconds and waits for a fresh heartbeat echoing a randomly seeded packet sequence. A software acknowledgement or an unrelated diagnostic heartbeat is insufficient. Starting capture with Titan bridge enabled repeats this check and refuses to open capture if it fails. Detection-only capture remains available with the bridge disabled. The check verifies local transport and device payload consumption, not controller authentication, console actions, timing accuracy, or successful shots. Existing stale-packet cancellation still applies during capture. The bridge has its own lightweight Gtuner runtime; CUDA stays in the desktop app.
+
+## Slots, reconnect, and direct card display (2026102006)
+
+This version replaces the earlier PNG diagnostic view with an independent raw BGR live display in the desktop app. One reader owns the capture card and continuously drains it while inference works. The app reads the newest completed buffer from a two-buffer memory-mapped mailbox; it does not open the capture card again, encode PNGs for direct display, or build a video backlog. The displayed card image is raw; AI measurements and bridge status are reported separately. Reducing display FPS reduces display work independently of the capture request and model input size.
+
+| Setting | Choices / behavior |
+| --- | --- |
+| Capture FPS request | 60, 120, 240; requires a card/source/USB mode that actually delivers it |
+| Capture backend and format | DirectShow: MJPG, YUY2, BGR3 requests; Media Foundation: MJPG, YUY2 requests; Auto/default |
+| Performance display | Up to 1280×720, default display limit 120 FPS |
+| Resolution display | Up to 1920×1080, default display limit 60 FPS |
+| Display limit | 15, 30, 60, 120, 240; adjustable during a run |
+
+Presets change the display, not the requested card dimensions or the detector weight/input. Width and height still select the card mode. OpenCV delivers decoded BGR; BGR3 is a device-format request, not a promise that a driver supports native BGR. Capture delivery FPS, AI FPS, rendered FPS, raw-frame age, reported card mode, and skipped inference frames are distinct. Neither selecting 240 nor selecting Performance creates extra unique source frames. Performance on the user's physical capture card and CUDA environment still needs measurement.
+
+The low-latency reader drops old frames **for inference** when AI cannot keep up. Every such source-frame gap is recorded in `capture_skips.jsonl` and per-row `source_frame` / `skipped_before`; unknown frames cannot support fill, plateau, or consecutive green confirmation. They count against the real-time target. Raw training recording contains the analyzed frames, not every card-delivered frame. Such a sampled run is rejected as exhaustive validation. For frame-complete testing, keep using sequential `run_live.py` without `--live-direct`, or `run_video.py` against a separately recorded original video, and the testing/validation workflow. No model weights or meter families were changed in this update.
+
+### Titan Two slot selection
+
+Update through the app, then let **Launch NBA2K CV.bat** finish installing its Windows accessibility dependency. The updater restarts through that launcher. Select the real Gtuner executable, run one Gtuner IV instance, and keep the **Device Memory Slots** pane visible. **Refresh Slot Names** reads labels exposed by Gtuner's Windows accessibility tree; unavailable or ambiguous labels stay explicitly unavailable. These labels are software observations, not proof of flash contents or an empty slot.
+
+**Auto (meter bridge)** chooses only one unambiguously named `NBA2K CV Meter Bridge` or `titan_meter.gpc` slot. If the label cannot be read, select its known slot number explicitly. With automatic selection enabled, startup, reconnect, and pre-capture checks request that slot using Gtuner's documented Ctrl+1…9 shortcut, targeted to the selected Gtuner process after a focus check. It may bring Gtuner to the foreground. Switching is refused while capture is running. A sent shortcut is not reported as a confirmed switch: a fresh GPC heartbeat must report the selected slot and echo the new unarmed payload before bridged capture starts.
+
+**Reinstall the exported `titan_meter.gpc` in Gtuner once for this version**, and reload the matching `gtuner_meter.py` worker: its new heartbeat includes `mslot_get()`. The app still does not compile or write memory slots automatically. Old three-field heartbeats remain visible as hardware evidence but cannot confirm a selected slot. The GPC source has not been compiled or run on physical Titan hardware in this environment.
+
+**Connect / Reconnect** reattaches to Gtuner and reruns slot selection and the unarmed transport check. **Disconnect App Bridge** stops this app's run and disables its trigger; it does not unplug USB or close Gtuner. A verified bridge that goes stale during capture disables the green trigger, saves/stops the run, and attempts up to three software reconnections. On verified recovery, capture restarts as a new run with the trigger still off. Stop or Disconnect cancels automatic restart. A missing cable, a closed Gtuner CV worker, an inaccessible slot pane, or a dead USB driver can require user action; reconnect does not reset firmware or fabricate a connected status.
+
+Primary references: [Gtuner slot shortcuts, vendor issue #89](https://github.com/J2Kbr/GtunerIV/issues/89), [vendor slot functions issue #75](https://github.com/J2Kbr/GtunerIV/issues/75), [OpenCV video backend/property reference](https://docs.opencv.org/4.12.0/d4/d15/group__videoio__flags__base.html).

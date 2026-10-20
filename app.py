@@ -14,7 +14,7 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 from app_update import (apply_update, configured_feed, current_version,
                         download_release, fetch_manifest, newest_download)
 from app_model import import_model, managed_model, model_catalog
-from run_live import green_config
+from run_live import green_config, RawMailbox, GtunerController, slot_number, choose_meter_slot
 
 
 PROJECT=Path(__file__).resolve().parent
@@ -73,6 +73,16 @@ class Desktop(tk.Tk):
         self.importing_model=False
         self.preparing_bridge=False
         self.gtuner_launched=False
+        self.raw_preview=None
+        self.raw_preview_sequence=0
+        self.raw_preview_photo_size=None
+        self.display_count=0
+        self.display_started=time.perf_counter()
+        self.bridge_seen_ready=False
+        self.pending_reconnect=False
+        self.resume_after_reconnect=False
+        self.reconnect_attempts=0
+        self.capture_launch_requested=False
         self.messages=queue.Queue()
         saved=load_settings()
         self.known_models=list(saved.get('known_models',[]))
@@ -93,6 +103,10 @@ class Desktop(tk.Tk):
         self.width=tk.StringVar(value=saved.get('width','1920'))
         self.height=tk.StringVar(value=saved.get('height','1080'))
         self.fps=tk.StringVar(value=saved.get('fps','60'))
+        self.capture_type=tk.StringVar(value=saved.get('capture_type','DirectShow / MJPG'))
+        self.render_mode=tk.StringVar(value=saved.get('render_mode','Performance'))
+        self.display_fps=tk.StringVar(value=saved.get('display_fps','120'))
+        self.display_metrics=tk.StringVar(value='Display idle — capture and AI FPS are measured separately')
         self.imgsz=tk.StringVar(value=saved.get('imgsz','1280'))
         self.imgsz.trace_add('write',lambda *_:self._input_changed())
         self.seconds=tk.StringVar(value=saved.get('seconds','0'))
@@ -102,6 +116,8 @@ class Desktop(tk.Tk):
         self.bridge_enabled=tk.BooleanVar(value=saved.get('bridge_enabled',False))
         self.gtuner_path=tk.StringVar(value=saved.get('gtuner_path',''))
         self.auto_gtuner=tk.BooleanVar(value=saved.get('auto_gtuner',True))
+        self.titan_slot=tk.StringVar(value=saved.get('titan_slot','Auto (meter bridge)'))
+        self.auto_slot=tk.BooleanVar(value=saved.get('auto_slot',True))
         self.bridge_setup_status=tk.StringVar(value='Not checked — install the script in Gtuner once')
         self.bridge_status=tk.StringVar(value='Bridge off • Titan Two hardware not verified')
         self.live_metrics=tk.StringVar(value='Preview idle')
@@ -122,6 +138,7 @@ class Desktop(tk.Tk):
         self.update_notice=None
         self._build()
         self.after(100,self._poll)
+        self.after(10,self._display_tick)
         self.after(500,lambda:self._check_online(silent=True))
         self.after(1000,self._startup_bridge)
         self.after(300000,self._periodic_update_check)
@@ -235,12 +252,23 @@ class Desktop(tk.Tk):
         for col,(title,var) in enumerate([('Width',self.width),('Height',self.height),('FPS',self.fps)]):
             sizes.columnconfigure(col,weight=1)
             ttk.Label(sizes,text=title,style='CardMuted.TLabel').grid(row=0,column=col,sticky='w')
-            ttk.Entry(sizes,textvariable=var,width=7).grid(row=1,column=col,sticky='ew',padx=(0,5),pady=4)
+            widget=(ttk.Combobox(sizes,textvariable=var,values=('60','120','240'),state='readonly',width=7)
+                    if title=='FPS' else ttk.Entry(sizes,textvariable=var,width=7))
+            widget.grid(row=1,column=col,sticky='ew',padx=(0,5),pady=4)
+        ttk.Label(capture,text='Capture backend / requested format',style='CardMuted.TLabel').pack(anchor='w',pady=(7,4))
+        ttk.Combobox(capture,textvariable=self.capture_type,values=('DirectShow / MJPG','DirectShow / YUY2',
+            'DirectShow / BGR3','Media Foundation / MJPG','Media Foundation / YUY2','Auto / Default'),state='readonly').pack(fill='x')
+        ttk.Label(capture,text='Live BGR display preset',style='CardMuted.TLabel').pack(anchor='w',pady=(7,4))
+        render=ttk.Combobox(capture,textvariable=self.render_mode,values=('Performance','Resolution'),state='readonly')
+        render.pack(fill='x');render.bind('<<ComboboxSelected>>',self._render_preset)
+        ttk.Label(capture,text='Display FPS limit (independent of capture)',style='CardMuted.TLabel').pack(anchor='w',pady=(7,4))
+        display=ttk.Combobox(capture,textvariable=self.display_fps,values=('15','30','60','120','240'),state='readonly')
+        display.pack(fill='x');display.bind('<<ComboboxSelected>>',self._display_changed)
         ttk.Label(capture,text='Duration in seconds  •  0 = until Stop',style='CardMuted.TLabel').pack(anchor='w',pady=(7,4))
         ttk.Entry(capture,textvariable=self.seconds,width=10).pack(fill='x')
         ttk.Checkbutton(capture,text='Show live preview',variable=self.preview).pack(anchor='w',pady=(8,0))
         ttk.Checkbutton(capture,text='Save annotated replay',variable=self.record).pack(anchor='w')
-        ttk.Checkbutton(capture,text='Save raw training footage',variable=self.raw).pack(anchor='w')
+        ttk.Checkbutton(capture,text='Save analyzed training frames',variable=self.raw).pack(anchor='w')
         runtime=self._card(controls,'03   RUNTIME & CONTROLLER')
         ttk.Label(runtime,text='Python environment',style='CardMuted.TLabel').pack(anchor='w')
         self.environment_menu=ttk.Combobox(runtime,textvariable=self.environment,width=26)
@@ -271,6 +299,7 @@ class Desktop(tk.Tk):
         ttk.Label(video,text='LIVE CAPTURE',style='Section.TLabel').grid(row=0,column=0,sticky='w',pady=(0,10))
         self.screen=ttk.Label(video,text='Ready for your capture\n\nChoose a weight, then start live detection.',style='Video.TLabel',anchor='center')
         self.screen.grid(row=1,column=0,sticky='nsew')
+        ttk.Label(video,textvariable=self.display_metrics,style='CardMuted.TLabel').grid(row=3,column=0,sticky='w',pady=(0,4))
         ttk.Label(video,textvariable=self.live_metrics,style='CardMuted.TLabel',wraplength=650).grid(row=2,column=0,sticky='w',pady=(10,0))
         ttk.Label(work,textvariable=self.bridge_status,style='Muted.TLabel',wraplength=700).grid(row=3,column=0,sticky='w',pady=10)
         self.log=scrolledtext.ScrolledText(work,height=4,state='disabled',background='#0b141f',foreground='#9eb4ca',insertbackground='#e6edf5',relief='flat',font=('Consolas',9))
@@ -301,7 +330,7 @@ class Desktop(tk.Tk):
             'Enable “Recall loaded memory slot between power cycles” in Gtuner Device Configuration.\n'
             'Start gtuner_meter.py in Gtuner Computer Vision with a Null or separate display source. '
             'Do not open the same capture card in both apps.\n'
-            'This app can open Gtuner and the matching files automatically. It cannot flash or select a slot through a verified API yet. '
+            'This app opens Gtuner and requests the chosen slot with its documented shortcut. Slot programming still uses Gtuner. '
             'Before bridged capture, it checks a fresh, unarmed v2 payload echo from the Titan script. '
             'This proves the bridge round trip, not console action or shot accuracy.'),
             wraplength=960,justify='left').pack(anchor='w',pady=10)
@@ -313,7 +342,23 @@ class Desktop(tk.Tk):
         ttk.Button(row,text='Browse',command=self._browse_gtuner).pack(side='left',padx=8)
         ttk.Checkbutton(launcher,text='Open Gtuner on app startup when Titan bridge is enabled',
             variable=self.auto_gtuner,command=self._save).pack(anchor='w',pady=5)
-        ttk.Button(launcher,text='Prepare / Check Bridge',command=self._prepare_bridge).pack(anchor='w')
+        slot_controls=ttk.Frame(launcher);slot_controls.pack(fill='x',pady=6)
+        ttk.Label(slot_controls,text='Default / selected slot').pack(side='left')
+        ttk.Combobox(slot_controls,textvariable=self.titan_slot,values=('Auto (meter bridge)',*tuple(str(i) for i in range(1,10))),
+            state='readonly',width=20).pack(side='left',padx=8)
+        ttk.Button(slot_controls,text='Switch Slot',command=lambda:self._prepare_bridge(force_slot=True)).pack(side='left')
+        ttk.Checkbutton(launcher,text='Automatically select this slot on startup / reconnect / before capture',
+            variable=self.auto_slot,command=self._save).pack(anchor='w')
+        connection=ttk.Frame(launcher);connection.pack(fill='x',pady=6)
+        ttk.Button(connection,text='Connect / Reconnect',command=self._connect_bridge).pack(side='left')
+        ttk.Button(connection,text='Disconnect App Bridge',command=self._disconnect_bridge).pack(side='left',padx=8)
+        ttk.Button(connection,text='Refresh Slot Names',command=lambda:self._prepare_bridge(read_only=True)).pack(side='left')
+        self.slot_table=ttk.Treeview(launcher,columns=('name','state'),show='tree headings',height=9)
+        self.slot_table.heading('#0',text='Slot');self.slot_table.column('#0',width=70,stretch=False)
+        self.slot_table.heading('name',text='Script label read from Gtuner');self.slot_table.column('name',width=400)
+        self.slot_table.heading('state',text='Device confirmation');self.slot_table.column('state',width=180)
+        self.slot_table.pack(fill='x',pady=6)
+        for i in range(1,10):self.slot_table.insert('', 'end',iid=str(i),text=str(i),values=('Unavailable — refresh with Gtuner open','Not verified'))
         ttk.Label(launcher,textvariable=self.bridge_setup_status,wraplength=940).pack(anchor='w',pady=6)
         calibration=ttk.LabelFrame(bridge_body,text='Green detection and stick flick',padding=10)
         calibration.pack(fill='x',pady=8)
@@ -399,7 +444,7 @@ class Desktop(tk.Tk):
             self.gtuner_path.set(chosen);self._save()
 
     def _startup_bridge(self):
-        if self.bridge_enabled.get() and self.auto_gtuner.get():self._prepare_bridge()
+        if self.bridge_enabled.get() and (self.auto_gtuner.get() or self.auto_slot.get()):self._prepare_bridge()
 
     def _launch_gtuner(self):
         folder=self._export_bridge()
@@ -408,28 +453,93 @@ class Desktop(tk.Tk):
         if sys.platform!='win32':raise RuntimeError('Gtuner startup is supported on Windows only.')
         if not executable.is_file() or executable.name.lower()!='gtuner.exe':
             raise ValueError('Select Gtuner.exe in the Titan Two tab, then Prepare / Check Bridge.')
+        try:import psutil
+        except ImportError as exc:raise RuntimeError('Restart with Launch NBA2K CV.bat to install Windows controls.') from exc
+        matching=[]
+        for process in psutil.process_iter(['exe']):
+            try:
+                if process.info['exe'] and os.path.normcase(str(Path(process.info['exe']).resolve()))==os.path.normcase(str(executable.resolve())):
+                    matching.append(process.pid)
+            except (psutil.Error,OSError):pass
+        if len(matching)>1:raise RuntimeError('Close extra Gtuner instances before connecting.')
+        if matching:self.gtuner_launched=True;return
         subprocess.Popen([str(executable),str(folder/'titan_meter.gpc'),str(folder/'gtuner_meter.py')],cwd=executable.parent)
         self.gtuner_launched=True
 
-    def _prepare_bridge(self,for_capture=False):
+    def _connect_bridge(self):
+        self.bridge_enabled.set(True)
+        self.pending_reconnect=True
+        self.reconnect_attempts=0
+        if self.live_active:
+            self.trigger_armed.set(False);self._apply_green()
+            self.resume_after_reconnect=True;self._stop(reconnect=True)
+        else:self._prepare_bridge()
+
+    def _disconnect_bridge(self):
+        self.pending_reconnect=False;self.resume_after_reconnect=False;self.capture_launch_requested=False
+        self.bridge_enabled.set(False);self.trigger_armed.set(False)
+        if self.live_active:self._apply_green();self._stop()
+        self._save()
+        self.bridge_setup_status.set('App bridge disconnected; Gtuner and USB remain connected.')
+        self.bridge_seen_ready=False
+        self._show_slots({},None)
+
+    def _show_slots(self,slots,active):
+        for i in range(1,10):
+            name=slots.get(i,slots.get(str(i))) if slots else None
+            current=self.slot_table.item(str(i),'values')
+            label=name or (current[0] if current and slots is None else 'Unavailable — Gtuner did not expose a label')
+            self.slot_table.item(str(i),values=(label,'Active — heartbeat verified' if active==i else 'Not verified'))
+
+    def _retry_bridge(self):
+        if self.pending_reconnect and not self.preparing_bridge and not self.live_active:
+            if self.reconnect_attempts<3:
+                self.reconnect_attempts+=1;self._prepare_bridge()
+            else:
+                self.pending_reconnect=False
+                self.bridge_setup_status.set('Reconnect attempts exhausted. Check USB PROG and the Gtuner CV worker, then Connect / Reconnect.')
+
+    def _prepare_bridge(self,for_capture=False,force_slot=False,read_only=False):
         if self._busy():return
+        try:selected=None if self.titan_slot.get()=="Auto (meter bridge)" else slot_number(self.titan_slot.get())
+        except ValueError as exc:
+            self.bridge_setup_status.set(str(exc));return
         self._save()
         try:
-            if not for_capture or not self.gtuner_launched:self._launch_gtuner()
+            if not self.gtuner_launched:self._launch_gtuner()
         except (OSError,ValueError,RuntimeError) as exc:
             self.bridge_setup_status.set(str(exc))
             if for_capture:messagebox.showerror('Bridge setup needed',str(exc))
             return
         self.preparing_bridge=True
-        self.bridge_setup_status.set('Checking Gtuner and Titan script payload echo...')
+        self.capture_launch_requested=for_capture
+        self.bridge_setup_status.set('Reading Gtuner slots and checking the Titan payload echo...')
+        executable=self.gtuner_path.get()
+        switch=(self.auto_slot.get() or force_slot) and not read_only
         def work():
-            client=None
+            client=None;slots={}
             try:
-                from run_live import BridgeClient
-                client=BridgeClient(26740)
-                result=client.probe()
-                self.messages.put(('bridge_prepared',(for_capture,result,None)))
-            except Exception as exc:self.messages.put(('bridge_prepared',(for_capture,None,str(exc))))
+                controller=GtunerController(executable)
+                deadline=time.monotonic()+5
+                while True:
+                    try:controller.connect();break
+                    except RuntimeError:
+                        if time.monotonic()>=deadline:raise
+                        time.sleep(.2)
+                try:slots=controller.read_slots()
+                except Exception:slots={}
+                target=selected
+                if switch:
+                    if target is None:target=choose_meter_slot(slots)
+                    controller.select_slot(target)
+                if read_only:
+                    result=dict(ready=False,receiver='not checked',hardware='not checked',read_only=True)
+                else:
+                    from run_live import BridgeClient
+                    client=BridgeClient(26740)
+                    result=client.probe(expected_slot=target if switch else None)
+                self.messages.put(('bridge_prepared',(for_capture,result,None,slots)))
+            except Exception as exc:self.messages.put(('bridge_prepared',(for_capture,None,str(exc),slots)))
             finally:
                 if client is not None:client.close()
         threading.Thread(target=work,daemon=True).start()
@@ -570,6 +680,8 @@ class Desktop(tk.Tk):
             imgsz=self.imgsz.get(),seconds=self.seconds.get(),environment=self.environment.get(),
             compute=self.compute.get(),controller=self.controller.get(),bridge_enabled=self.bridge_enabled.get(),
             gtuner_path=self.gtuner_path.get(),auto_gtuner=self.auto_gtuner.get(),
+            titan_slot=self.titan_slot.get(),auto_slot=self.auto_slot.get(),
+            capture_type=self.capture_type.get(),render_mode=self.render_mode.get(),display_fps=self.display_fps.get(),
             green=dict(green,armed=False)),indent=2),encoding='utf-8')
 
     def _out(self,prefix):
@@ -596,11 +708,28 @@ class Desktop(tk.Tk):
             return True
         return False
 
+    def _capture_mode(self):
+        modes={'DirectShow / MJPG':('dshow','MJPG'),'DirectShow / YUY2':('dshow','YUY2'),
+            'DirectShow / BGR3':('dshow','BGR3'),'Media Foundation / MJPG':('msmf','MJPG'),
+            'Media Foundation / YUY2':('msmf','YUY2'),'Auto / Default':('auto','')}
+        return modes.get(self.capture_type.get(),('auto',''))
+
+    def _render_preset(self,event=None):
+        self.display_fps.set('120' if self.render_mode.get()=='Performance' else '60')
+        self._display_changed()
+
+    def _display_changed(self,event=None):
+        self._save()
+        if self.live_active and self.active_out:
+            settings=dict(fps=int(self.display_fps.get()),mode=self.render_mode.get().lower())
+            from run_live import atomic_write
+            atomic_write(self.active_out/'display_settings.json',json.dumps(settings).encode())
+
     def _common(self,values):
         width,height,fps,imgsz,seconds=values
-        return (['--source',self.source.get(),'--width',str(width),'--height',str(height),
-                 '--capture-fps',str(fps),'--fourcc','MJPG','--seconds',str(seconds)] +
-                (['--dshow'] if sys.platform=='win32' else []))
+        backend,fourcc=self._capture_mode()
+        return ['--source',self.source.get(),'--width',str(width),'--height',str(height),
+            '--capture-fps',str(fps),'--fourcc',fourcc,'--backend',backend,'--seconds',str(seconds)]
 
     def _live(self,bridge_ready=False):
         if self._busy():return
@@ -624,11 +753,20 @@ class Desktop(tk.Tk):
         (out/'green_settings.json').write_text(json.dumps(green),encoding='utf-8')
         cmd += ['--green-settings',str(out/'green_settings.json')]
         cmd += ['--headless','--ui-status','--device',self.compute.get(),'--stop-file',str(out/'stop.request')]
+        cmd += ['--live-direct','--display-fps',self.display_fps.get(),'--render-mode',self.render_mode.get().lower()]
+        (out/'display_settings.json').write_text(json.dumps(dict(fps=int(self.display_fps.get()),mode=self.render_mode.get().lower())))
+        cmd += ['--display-settings',str(out/'display_settings.json')]
         if self.preview.get():cmd.append('--ui-preview')
-        if self.bridge_enabled.get():cmd += ['--bridge-port','26740']
+        if self.bridge_enabled.get():
+            cmd += ['--bridge-port','26740']
+            active=getattr(self,'verified_titan_slot',None)
+            if active:cmd += ['--expected-slot',str(active)]
         (out/'app_profile.json').write_text(json.dumps(dict(environment=executable,
             compute=self.compute.get(),controller=self.controller.get(),model=str(model))),encoding='utf-8')
+        self._close_raw_preview()
         self.live_active=True
+        self.bridge_seen_ready=False
+        self.display_count=0;self.display_started=time.perf_counter()
         self.active_out=out
         self.last_preview_stamp=None
         self.bridge_status.set('Waiting for Gtuner • Titan Two hardware not verified' if self.bridge_enabled.get() else 'Bridge off')
@@ -690,7 +828,9 @@ class Desktop(tk.Tk):
             self.messages.put(('done',(process.wait(),str(out))))
         threading.Thread(target=read_output,daemon=True).start()
 
-    def _stop(self):
+    def _stop(self,reconnect=False):
+        if not reconnect:
+            self.pending_reconnect=False;self.resume_after_reconnect=False;self.capture_launch_requested=False
         if self.process and self.process.poll() is None:
             if self.live_active and self.active_out:
                 (self.active_out/'stop.request').touch()
@@ -711,14 +851,22 @@ class Desktop(tk.Tk):
                     self.finding_models=False;self.status.set('Model search failed: '+value)
                 elif kind=='bridge_prepared':
                     self.preparing_bridge=False
-                    capture,result,error=value
+                    capture,result,error,slots=value
                     ready=bool(result and result.get('ready'))
-                    detail=('Bridge ready — fresh v2 Titan payload echo verified; console unverified.' if ready else
-                        'Bridge not ready — '+(error or f"{result['receiver']}; {result['hardware']}. Select the meter slot and start the Gtuner CV worker, then retry."))
+                    read_only=bool(result and result.get('read_only'))
+                    self._show_slots(slots,result.get('active_slot') if ready else None)
+                    detail=('Bridge ready — Titan slot '+str(result.get('active_slot') or 'unknown')+' and payload echo verified; console unverified.' if ready else
+                        'Slot labels refreshed; device not checked.' if read_only else
+                        'Bridge not ready — '+(error or f"{result['receiver']}; {result['hardware']}. Install the latest meter GPC in the chosen slot and start its CV worker, then retry."))
                     self.bridge_setup_status.set(detail)
-                    if capture:
-                        if ready:self._live(bridge_ready=True)
-                        else:messagebox.showerror('Capture not started',detail)
+                    if ready:
+                        self.verified_titan_slot=result.get('active_slot')
+                        resume=self.resume_after_reconnect
+                        self.pending_reconnect=False;self.resume_after_reconnect=False;self.reconnect_attempts=0
+                        if self.bridge_enabled.get() and ((capture and self.capture_launch_requested) or resume):
+                            self.capture_launch_requested=False;self._live(bridge_ready=True)
+                    elif capture:messagebox.showerror('Capture not started',detail)
+                    elif self.pending_reconnect:self.after(3000,self._retry_bridge)
                 elif kind=='release':
                     self.checking_updates=False
                     self._handle_release(value)
@@ -741,6 +889,8 @@ class Desktop(tk.Tk):
                 else:
                     code,out=value
                     self.live_active=False
+                    self._close_raw_preview()
+                    if self.pending_reconnect:self.after(1000,self._retry_bridge)
                     self.bridge_status.set('Run stopped • bridge inactive')
                     self.status.set(f'Finished (exit {code}) • {out}')
                     self._log(f'\nFinished with exit code {code}. Results: {out}\n')
@@ -758,10 +908,18 @@ class Desktop(tk.Tk):
             self.capture_fps_label.set(f"{data['fps']:.1f}")
             self.inference_label.set(f"{data['inference_ms']:.1f} ms")
             self.observation_label.set(data['status'].upper() if age<=1 else 'STALE')
-            self.live_metrics.set(f"{data['fps']:.1f} processed FPS | inference {data['inference_ms']:.1f} ms | "
+            self.live_metrics.set(f"Capture {data.get('capture_fps',0):.1f} FPS | AI {data['fps']:.1f} FPS | skipped {data.get('skipped_inference_frames',0)} | inference {data['inference_ms']:.1f} ms | "
                 f"{data['status']} | preview age {age:.1f}s" + (" • STALE" if age>1 else ""))
             bridge=data.get("bridge")
             if bridge:
+                self._show_slots(None,bridge.get('active_slot') if age<=.75 else None)
+                verified=age<=.75 and bridge.get('hardware')=='heartbeat verified'
+                if verified:self.bridge_seen_ready=True
+                elif self.bridge_seen_ready and self.bridge_enabled.get() and not self.pending_reconnect:
+                    self.trigger_armed.set(False);self._apply_green()
+                    self.pending_reconnect=True;self.resume_after_reconnect=True;self.reconnect_attempts=0
+                    self.bridge_setup_status.set('Bridge lost — trigger disabled; stopping capture before automatic reconnect.')
+                    self._stop(reconnect=True)
                 self.bridge_status.set("Bridge stale • hardware not verified" if age>.75 else
                     f"Gtuner: {bridge['receiver']} | Titan Two: {bridge['hardware']} | "
                     f"local ACK {bridge.get('rtt_ms') or 0:.1f} ms | device event {bridge.get('device_event')} (not console confirmation)")
@@ -770,6 +928,7 @@ class Desktop(tk.Tk):
                 self.green_status.set(f"{'ARMED' if trigger.get('armed') else 'DRY RUN'} | "
                     f"in green: {measurement.get('in_green',False)} | event {trigger.get('event_id',0)} | "
                     f"{measurement.get('reason','')}" + (' • STALE' if age>.25 else ''))
+            if (self.active_out/'live_bgr.bin').exists():return
             image=self.active_out/'preview.png'
             stamp=image.stat().st_mtime_ns
             if stamp!=self.last_preview_stamp:
@@ -780,6 +939,38 @@ class Desktop(tk.Tk):
                 self.screen.configure(image=self.preview_image,text="")
                 self.last_preview_stamp=stamp
         except (OSError,ValueError,KeyError,tk.TclError):pass
+
+    def _close_raw_preview(self):
+        if self.raw_preview is not None:
+            self.raw_preview.close();self.raw_preview=None
+        self.raw_preview_sequence=0
+        self.raw_preview_photo_size=None
+
+    def _display_tick(self):
+        started=time.perf_counter()
+        try:
+            if self.live_active and self.active_out and self.preview.get():
+                if self.raw_preview is None and (self.active_out/'live_bgr.bin').exists():
+                    self.raw_preview=RawMailbox(self.active_out/'live_bgr.bin')
+                sample=self.raw_preview.read(self.raw_preview_sequence) if self.raw_preview else None
+                if sample:
+                    from PIL import Image,ImageTk
+                    image=Image.frombytes('RGB',(sample['width'],sample['height']),sample['bgr'],'raw','BGR')
+                    image.thumbnail((max(1,self.screen.winfo_width()),max(1,self.screen.winfo_height())))
+                    if self.raw_preview_photo_size==image.size and hasattr(self.preview_image,'paste'):
+                        self.preview_image.paste(image)
+                    else:
+                        self.preview_image=ImageTk.PhotoImage(image)
+                        self.raw_preview_photo_size=image.size
+                        self.screen.configure(image=self.preview_image,text='')
+                    self.raw_preview_sequence=sample['sequence'];self.display_count+=1
+                    elapsed=max(.001,time.perf_counter()-self.display_started)
+                    self.display_metrics.set(f"Direct card BGR | rendered {self.display_count/elapsed:.1f} FPS / limit {self.display_fps.get()} | frame age {max(0,time.time()-sample['timestamp'])*1000:.0f} ms")
+        except (OSError,ValueError,tk.TclError):pass
+        try:fps=int(self.display_fps.get())
+        except ValueError:fps=60
+        interval=1/max(1,fps)
+        self.after(max(1,round(1000*(interval-(time.perf_counter()-started)))),self._display_tick)
 
     def _log(self,value):
         self.log.configure(state='normal');self.log.insert('end',value)
@@ -896,7 +1087,9 @@ class Desktop(tk.Tk):
             self._update_failed(str(exc))
             messagebox.showerror('Update failed',str(exc));return
         messagebox.showinfo('Updated',f"Updated to version {result['version']}. The app will restart.")
-        subprocess.Popen([sys.executable,str(PROJECT/'app.py')],cwd=PROJECT)
+        if sys.platform=='win32':
+            subprocess.Popen(['cmd.exe','/c',str(PROJECT/'Launch NBA2K CV.bat')],cwd=PROJECT)
+        else:subprocess.Popen([sys.executable,str(PROJECT/'app.py')],cwd=PROJECT)
         self.destroy()
 
     def _update_local(self):
@@ -928,6 +1121,7 @@ class Desktop(tk.Tk):
                 self.after(100,self._wait_close)
                 return
             self.process.terminate()
+        self._close_raw_preview()
         self.destroy()
 
     def _wait_close(self):

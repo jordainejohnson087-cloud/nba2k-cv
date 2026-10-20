@@ -31,6 +31,10 @@ def build(archive, repository):
     live = files['run_live.py'].decode('utf-8')
     live = live.replace('from live_link import BridgeClient, SnapshotPublisher, atomic_write',
                         (ROOT/'live_link.py').read_text(encoding='utf-8'))
+    live = live.replace('from capture_pipe import LatestCapture, RawMailbox',
+                        (ROOT/'capture_pipe.py').read_text(encoding='utf-8'))
+    live = live.replace('from titan_control import GtunerController, slot_number, choose_meter_slot',
+                        (ROOT/'titan_control.py').read_text(encoding='utf-8'))
     live = live.replace('from meter_green import GreenGate, green_config, measure_green',
                         (ROOT/'meter_green.py').read_text(encoding='utf-8'))
     resources = '\nGTUNER_SOURCE = ' + repr((ROOT/'bridge/gtuner_meter.py').read_text(encoding='utf-8'))
