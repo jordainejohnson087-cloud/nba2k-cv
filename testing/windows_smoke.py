@@ -18,6 +18,8 @@ def main():
     import cv2
     import torch
     import ultralytics
+    import pywinauto
+    import psutil
     from app import Desktop
 
     with patch.object(Desktop, '_check_online'):
