@@ -292,8 +292,10 @@ class Desktop(tk.Tk):
 
         self.bridge_tab=ttk.Frame(self.tabs,padding=20)
         self.tabs.add(self.bridge_tab,text='Titan Two')
-        ttk.Label(self.bridge_tab,text='Titan Two / Gtuner bridge',font=('Segoe UI',14,'bold')).pack(anchor='w',pady=8)
-        ttk.Label(self.bridge_tab,text=(
+        bridge_scroll,bridge_body=self._scroll_panel(self.bridge_tab,width=960)
+        bridge_scroll.pack(fill='both',expand=True)
+        ttk.Label(bridge_body,text='Titan Two / Gtuner bridge',font=('Segoe UI',14,'bold')).pack(anchor='w',pady=8)
+        ttk.Label(bridge_body,text=(
             'Connect Titan Two PROG to the PC, OUTPUT to the console, and the controller to INPUT-A.\n'
             'One-time setup: install titan_meter.gpc to an unused Gtuner memory slot and select it. '
             'Enable “Recall loaded memory slot between power cycles” in Gtuner Device Configuration.\n'
@@ -303,7 +305,7 @@ class Desktop(tk.Tk):
             'Before bridged capture, it checks a fresh, unarmed v2 payload echo from the Titan script. '
             'This proves the bridge round trip, not console action or shot accuracy.'),
             wraplength=960,justify='left').pack(anchor='w',pady=10)
-        launcher=ttk.LabelFrame(self.bridge_tab,text='Startup and bridge readiness',padding=10)
+        launcher=ttk.LabelFrame(bridge_body,text='Startup and bridge readiness',padding=10)
         launcher.pack(fill='x',pady=6)
         row=ttk.Frame(launcher);row.pack(fill='x')
         ttk.Label(row,text='Gtuner IV executable').pack(side='left',padx=(0,8))
@@ -313,7 +315,7 @@ class Desktop(tk.Tk):
             variable=self.auto_gtuner,command=self._save).pack(anchor='w',pady=5)
         ttk.Button(launcher,text='Prepare / Check Bridge',command=self._prepare_bridge).pack(anchor='w')
         ttk.Label(launcher,textvariable=self.bridge_setup_status,wraplength=940).pack(anchor='w',pady=6)
-        calibration=ttk.LabelFrame(self.bridge_tab,text='Green detection and stick flick',padding=10)
+        calibration=ttk.LabelFrame(bridge_body,text='Green detection and stick flick',padding=10)
         calibration.pack(fill='x',pady=8)
         fields=[('Hue low','hue_low'),('Hue high','hue_high'),('Saturation min','saturation_min'),
             ('Brightness min','value_min'),('Green row fraction','row_coverage'),('Confidence min','min_confidence'),
@@ -330,8 +332,8 @@ class Desktop(tk.Tk):
             variable=self.trigger_armed).grid(row=5,column=0,columnspan=6,sticky='w',pady=6)
         ttk.Button(calibration,text='Apply Detection / Flick Settings',command=self._apply_green).grid(row=6,column=0,columnspan=6,sticky='w')
         ttk.Label(calibration,textvariable=self.green_status,wraplength=950).grid(row=7,column=0,columnspan=6,sticky='w',pady=4)
-        ttk.Label(self.bridge_tab,textvariable=self.bridge_status).pack(anchor='w',pady=10)
-        ttk.Button(self.bridge_tab,text='Open Bridge Files',command=self._open_bridge).pack(anchor='w')
+        ttk.Label(bridge_body,textvariable=self.bridge_status).pack(anchor='w',pady=10)
+        ttk.Button(bridge_body,text='Open Bridge Files',command=self._open_bridge).pack(anchor='w')
         results=ttk.Frame(self.tabs,padding=14);self.tabs.add(results,text='Results')
         ttk.Button(results,text='Refresh Runs',command=self._refresh).pack(anchor='w')
         self.runs=ttk.Treeview(results,columns=('device','fps','frames'),show='tree headings',height=13)
