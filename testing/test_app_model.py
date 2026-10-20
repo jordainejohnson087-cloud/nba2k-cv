@@ -44,7 +44,7 @@ class ModelCatalogTests(unittest.TestCase):
             self.assertEqual(len(catalog),2)
             self.assertEqual(len({item['label'] for item in catalog}),2)
             self.assertIn('meter_v2_gpu_1280-6 / best.pt',[item['label'] for item in catalog])
-            self.assertEqual({item['path'] for item in catalog},{str(first),str(second)})
+            self.assertEqual({item['path'] for item in catalog},{str(first.resolve()),str(second.resolve())})
 
     def test_catalog_skips_missing_empty_and_nonweight_files(self):
         from app_model import model_catalog

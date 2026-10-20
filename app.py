@@ -392,7 +392,9 @@ class Desktop(tk.Tk):
 
     def _model_changed(self):
         value=self.model.get()
-        entry=next((item for item in self.catalog if item['path']==value),None)
+        try:resolved=str(Path(value).resolve()) if value else ''
+        except (OSError,ValueError):resolved=value
+        entry=next((item for item in self.catalog if os.path.normcase(item['path'])==os.path.normcase(resolved)),None)
         if entry:
             self.model_choice.set(entry['label'])
             self.model_detail.set(f"{entry['size_bytes']/1048576:.1f} MB  •  {entry['path']}")

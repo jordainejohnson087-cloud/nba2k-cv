@@ -44,11 +44,11 @@ def main():
                 app.model.set(str(model))
                 with patch.object(app_module,'PROJECT',out),patch.object(app_module,'SETTINGS',out/'settings.json'):
                     app._refresh_choices()
-                    choice=next(label for label,path in app.model_choices.items() if path==str(alternative))
+                    choice=next(label for label,path in app.model_choices.items() if path==str(alternative.resolve()))
                     app.model_choice.set(choice);app._select_model()
-                    assert app.model.get()==str(alternative)
+                    assert app.model.get()==str(alternative.resolve())
                     saved=json.loads((out/'settings.json').read_text())
-                    assert saved['model']==str(alternative)
+                    assert saved['model']==str(alternative.resolve())
                     assert str(model) in saved['known_models']
                     assert str(app.model_menu.cget('state'))=='readonly'
                 app.model.set(str(model));app.environment.set(sys.executable)
