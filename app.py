@@ -1139,4 +1139,15 @@ class Desktop(tk.Tk):
         else:self.destroy()
 
 
-if __name__=='__main__':Desktop().mainloop()
+def bootstrap_windows_controls():
+    """Old updaters restart app.py directly; finish new dependency setup once."""
+    if sys.platform!='win32':return False
+    import importlib.util
+    if any(importlib.util.find_spec(name) is None for name in ('pywinauto','psutil')):
+        subprocess.Popen(['cmd.exe','/c',str(PROJECT/'Launch NBA2K CV.bat')],cwd=PROJECT)
+        return True
+    return False
+
+
+if __name__=='__main__':
+    if not bootstrap_windows_controls():Desktop().mainloop()

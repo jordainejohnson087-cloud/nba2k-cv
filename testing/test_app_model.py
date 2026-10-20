@@ -65,3 +65,14 @@ class ModelCatalogTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+
+class UpdateBootstrapTests(unittest.TestCase):
+    def test_old_updater_restart_installs_missing_windows_controls_via_launcher(self):
+        import app
+        with patch.object(app.sys,'platform','win32'),patch('importlib.util.find_spec',return_value=None),patch.object(app.subprocess,'Popen') as launch:
+            self.assertTrue(app.bootstrap_windows_controls())
+            self.assertEqual(launch.call_args.args[0],['cmd.exe','/c',str(app.PROJECT/'Launch NBA2K CV.bat')])
+        with patch.object(app.sys,'platform','win32'),patch('importlib.util.find_spec',return_value=object()),patch.object(app.subprocess,'Popen') as launch:
+            self.assertFalse(app.bootstrap_windows_controls())
+            launch.assert_not_called()
