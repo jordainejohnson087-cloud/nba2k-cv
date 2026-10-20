@@ -34,3 +34,26 @@ class TitanControlTests(unittest.TestCase):
     def test_missing_accessibility_labels_are_not_invented(self):
         window=Mock();window.descendants.return_value=[]
         self.assertEqual(GtunerController('Gtuner.exe',window).read_slots(),dict.fromkeys(range(1,10)))
+
+
+class ReconnectIntentTests(unittest.TestCase):
+    def test_stop_cancels_pending_reconnect_and_capture_start(self):
+        from app import Desktop
+        from types import SimpleNamespace
+        app=SimpleNamespace(pending_reconnect=True,resume_after_reconnect=True,
+                            capture_launch_requested=True,process=None)
+        Desktop._stop(app)
+        self.assertFalse(app.pending_reconnect)
+        self.assertFalse(app.resume_after_reconnect)
+        self.assertFalse(app.capture_launch_requested)
+
+    def test_reconnect_during_capture_disarms_and_stops_before_retry(self):
+        from app import Desktop
+        from types import SimpleNamespace
+        app=SimpleNamespace(bridge_enabled=Mock(),trigger_armed=Mock(),live_active=True,
+                            _apply_green=Mock(),_stop=Mock(),_prepare_bridge=Mock())
+        Desktop._connect_bridge(app)
+        app.trigger_armed.set.assert_called_once_with(False)
+        app._stop.assert_called_once_with(reconnect=True)
+        app._prepare_bridge.assert_not_called()
+        self.assertTrue(app.resume_after_reconnect)

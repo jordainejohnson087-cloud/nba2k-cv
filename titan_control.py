@@ -40,6 +40,7 @@ class GtunerController:
     def __init__(self, executable, window=None):
         self.executable=Path(executable)
         self.window=window  # Injectable accessibility wrapper for tests.
+        self.com_initialized=False
 
     def connect(self):
         if self.window is not None:return self.window
@@ -49,6 +50,9 @@ class GtunerController:
         try:
             import psutil
             from pywinauto import Desktop
+            import comtypes
+            if not self.com_initialized:
+                comtypes.CoInitializeEx(0);self.com_initialized=True
         except ImportError as exc:
             raise RuntimeError('Restart with Launch NBA2K CV.bat to install the Windows slot-control dependency.') from exc
         candidates=[]
@@ -62,6 +66,12 @@ class GtunerController:
             raise RuntimeError('Open exactly one Gtuner IV window for the selected executable, then reconnect.')
         self.window=candidates[0]
         return self.window
+
+    def close(self):
+        self.window=None
+        if self.com_initialized:
+            import comtypes
+            comtypes.CoUninitialize();self.com_initialized=False
 
     def read_slots(self):
         window=self.connect()

@@ -173,8 +173,8 @@ def run(args, cv2, torch, YOLO):
     direct=getattr(args,'live_direct',False)
     display_fps=getattr(args,'display_fps',60)
     display_width,display_height=((1280,720) if getattr(args,'render_mode','performance')=='performance' else (1920,1080))
-    mailbox=RawMailbox(args.out/'live_bgr.bin',write=True) if direct and ui_enabled else None
-    display_state={'last':0.0,'error':None}
+    mailbox=RawMailbox(args.out/'live_bgr.bin',write=True) if direct and getattr(args,'ui_status',False) else None
+    display_state={'last':0.0,'error':None,'enabled':ui_enabled}
     def publish_raw(sample):
         settings_path=getattr(args,'display_settings',None)
         if settings_path and sample['read_at']-display_state.get('settings_checked',0)>.5:
@@ -183,10 +183,11 @@ def run(args, cv2, torch, YOLO):
                 settings=json.loads(settings_path.read_text())
                 if settings.get('fps') in (15,30,60,120,240) and settings.get('mode') in ('performance','resolution'):
                     display_state['fps']=settings['fps'];display_state['mode']=settings['mode']
+                    if type(settings.get('enabled')) is bool:display_state['enabled']=settings['enabled']
             except (OSError,ValueError):pass
         target_fps=display_state.get('fps',display_fps)
         target_width,target_height=((1280,720) if display_state.get('mode',getattr(args,'render_mode','performance'))=='performance' else (1920,1080))
-        if mailbox and sample['read_at']+.0005>=display_state.get('next',0):
+        if mailbox and display_state['enabled'] and sample['read_at']+.0005>=display_state.get('next',0):
             try:
                 mailbox.publish(sample['frame'],cv2,sample['source_frame'],sample['captured_at'],target_width,target_height)
                 previous=display_state.get('next',sample['read_at'])
@@ -454,6 +455,8 @@ def main():
     args.ui_status = args.ui_status or args.ui_preview
     if not 0 <= args.bridge_port <= 65535:
         p.error('Invalid bridge port')
+    if args.dshow and args.backend not in ('auto','dshow'):
+        p.error('--dshow conflicts with the selected backend')
     if args.live_direct and Path(args.source).is_file():
         p.error('Direct mode is for a live device or stream; use run_video.py for exhaustive video validation.')
     if not args.probe_only and (args.model is None or not args.model.is_file()):

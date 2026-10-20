@@ -78,6 +78,8 @@ class Desktop(tk.Tk):
         self.raw_preview_photo_size=None
         self.display_count=0
         self.display_started=time.perf_counter()
+        self.last_display_timestamp=None
+        self.last_display_metric=0
         self.bridge_seen_ready=False
         self.pending_reconnect=False
         self.resume_after_reconnect=False
@@ -266,7 +268,7 @@ class Desktop(tk.Tk):
         display.pack(fill='x');display.bind('<<ComboboxSelected>>',self._display_changed)
         ttk.Label(capture,text='Duration in seconds  •  0 = until Stop',style='CardMuted.TLabel').pack(anchor='w',pady=(7,4))
         ttk.Entry(capture,textvariable=self.seconds,width=10).pack(fill='x')
-        ttk.Checkbutton(capture,text='Show live preview',variable=self.preview).pack(anchor='w',pady=(8,0))
+        ttk.Checkbutton(capture,text='Show live preview',variable=self.preview,command=self._display_changed).pack(anchor='w',pady=(8,0))
         ttk.Checkbutton(capture,text='Save annotated replay',variable=self.record).pack(anchor='w')
         ttk.Checkbutton(capture,text='Save analyzed training frames',variable=self.raw).pack(anchor='w')
         runtime=self._card(controls,'03   RUNTIME & CONTROLLER')
@@ -517,7 +519,7 @@ class Desktop(tk.Tk):
         executable=self.gtuner_path.get()
         switch=(self.auto_slot.get() or force_slot) and not read_only
         def work():
-            client=None;slots={}
+            client=None;controller=None;slots={}
             try:
                 controller=GtunerController(executable)
                 deadline=time.monotonic()+5
@@ -542,6 +544,7 @@ class Desktop(tk.Tk):
             except Exception as exc:self.messages.put(('bridge_prepared',(for_capture,None,str(exc),slots)))
             finally:
                 if client is not None:client.close()
+                if controller is not None:controller.close()
         threading.Thread(target=work,daemon=True).start()
 
     def _green_values(self):
@@ -721,7 +724,7 @@ class Desktop(tk.Tk):
     def _display_changed(self,event=None):
         self._save()
         if self.live_active and self.active_out:
-            settings=dict(fps=int(self.display_fps.get()),mode=self.render_mode.get().lower())
+            settings=dict(fps=int(self.display_fps.get()),mode=self.render_mode.get().lower(),enabled=self.preview.get())
             from run_live import atomic_write
             atomic_write(self.active_out/'display_settings.json',json.dumps(settings).encode())
 
@@ -754,7 +757,7 @@ class Desktop(tk.Tk):
         cmd += ['--green-settings',str(out/'green_settings.json')]
         cmd += ['--headless','--ui-status','--device',self.compute.get(),'--stop-file',str(out/'stop.request')]
         cmd += ['--live-direct','--display-fps',self.display_fps.get(),'--render-mode',self.render_mode.get().lower()]
-        (out/'display_settings.json').write_text(json.dumps(dict(fps=int(self.display_fps.get()),mode=self.render_mode.get().lower())))
+        (out/'display_settings.json').write_text(json.dumps(dict(fps=int(self.display_fps.get()),mode=self.render_mode.get().lower(),enabled=self.preview.get())))
         cmd += ['--display-settings',str(out/'display_settings.json')]
         if self.preview.get():cmd.append('--ui-preview')
         if self.bridge_enabled.get():
@@ -945,6 +948,8 @@ class Desktop(tk.Tk):
             self.raw_preview.close();self.raw_preview=None
         self.raw_preview_sequence=0
         self.raw_preview_photo_size=None
+        self.last_display_timestamp=None
+        self.display_metrics.set('Display stopped')
 
     def _display_tick(self):
         started=time.perf_counter()
@@ -964,8 +969,12 @@ class Desktop(tk.Tk):
                         self.raw_preview_photo_size=image.size
                         self.screen.configure(image=self.preview_image,text='')
                     self.raw_preview_sequence=sample['sequence'];self.display_count+=1
+                    self.last_display_timestamp=sample['timestamp']
+                if self.last_display_timestamp is not None and time.perf_counter()-self.last_display_metric>=.1:
+                    self.last_display_metric=time.perf_counter()
                     elapsed=max(.001,time.perf_counter()-self.display_started)
-                    self.display_metrics.set(f"Direct card BGR | rendered {self.display_count/elapsed:.1f} FPS / limit {self.display_fps.get()} | frame age {max(0,time.time()-sample['timestamp'])*1000:.0f} ms")
+                    age=max(0,time.time()-self.last_display_timestamp)
+                    self.display_metrics.set(f"Direct card BGR | rendered {self.display_count/elapsed:.1f} FPS / limit {self.display_fps.get()} | frame age {age*1000:.0f} ms"+(' • STALE' if age>.5 else ''))
         except (OSError,ValueError,tk.TclError):pass
         try:fps=int(self.display_fps.get())
         except ValueError:fps=60

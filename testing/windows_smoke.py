@@ -136,6 +136,17 @@ def main():
                 assert app.slot_table.item('1','values')[1]=='Active — heartbeat verified'
                 app._show_slots(None,None)
                 assert app.slot_table.item('1','values')[1]=='Not verified'
+                app.bridge_enabled.set(True);app.capture_launch_requested=False
+                result=dict(ready=True,active_slot=4)
+                with patch.object(app,'_live') as launch:
+                    app.messages.put(('bridge_prepared',(True,result,None,{4:'NBA2K CV Meter Bridge'})))
+                    app._poll()
+                    launch.assert_not_called()
+                    app.capture_launch_requested=True
+                    app.messages.put(('bridge_prepared',(True,result,None,{4:'NBA2K CV Meter Bridge'})))
+                    app._poll()
+                    launch.assert_called_once_with(bridge_ready=True)
+
 
         finally:
             app.destroy()

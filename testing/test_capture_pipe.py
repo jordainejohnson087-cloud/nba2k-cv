@@ -35,6 +35,25 @@ class CapturePipeTests(unittest.TestCase):
                 self.assertIsNone(reader.read())
             finally:reader.close();writer.close()
 
+    def test_concurrent_publication_never_returns_torn_pixels(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'frames.bin'
+            writer=RawMailbox(path,write=True);reader=RawMailbox(path)
+            def produce():
+                for frame in range(1,101):
+                    writer.publish(np.full((32,32,3),frame%256,dtype=np.uint8),cv2,frame,time.time())
+                    time.sleep(.0001)
+            thread=threading.Thread(target=produce);thread.start();seen=0;sequence=0
+            try:
+                while thread.is_alive():
+                    sample=reader.read(sequence)
+                    if sample:
+                        sequence=sample['sequence'];seen+=1
+                        self.assertEqual(sample['bgr'],bytes([sample['source_frame']%256])*len(sample['bgr']))
+                    time.sleep(.0001)
+                self.assertGreater(seen,0)
+            finally:thread.join();reader.close();writer.close()
+
     def test_reader_keeps_draining_while_consumer_is_slow(self):
         entered=threading.Event();release=threading.Event();owner=[]
         class Card:
