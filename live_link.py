@@ -137,5 +137,23 @@ class BridgeClient:
                     device_sequence=self.device_sequence if hardware else None,
                     device_event=self.device_event if hardware else None)
 
+    def probe(self, timeout=5, sleep=time.sleep):
+        """Verify a v2 payload echo using an unarmed challenge before capture opens."""
+        self.seq=secrets.randbelow(0x7fffffff)+1
+        first=self.seq+1
+        deadline=self.clock()+timeout
+        neutral=dict(status='absent',fill=None,shot_id=None,trigger=dict(
+            armed=False,green=False,valid=False,eligible=False,event_id=0,
+            delay_ms=0,hold_ms=10,max_age_ms=100,direction='up'))
+        status=self.status()
+        while self.clock()<deadline:
+            status=self.send(neutral)
+            sequence=status.get('device_sequence')
+            if (status['hardware']=='heartbeat verified' and type(sequence) is int
+                    and first<=sequence<=self.seq):
+                return dict(status,ready=True)
+            sleep(.05)
+        return dict(status,ready=False)
+
     def close(self):
         self.socket.close()

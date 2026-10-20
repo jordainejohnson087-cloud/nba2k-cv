@@ -139,3 +139,35 @@ class LinkTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+
+class BridgePreflightTests(unittest.TestCase):
+    def test_probe_requires_device_echo_of_new_unarmed_payload(self):
+        client=BridgeClient(26740)
+        ticks=[0.0]
+        client.clock=lambda:ticks[0]
+        packets=[]
+        def send(state):
+            packets.append(state)
+            client.seq+=1
+            return dict(receiver='receiving',hardware='heartbeat verified',
+                        device_sequence=client.seq if len(packets)>1 else 1)
+        try:
+            with patch.object(client,'send',side_effect=send):
+                result=client.probe(timeout=1,sleep=lambda delay:ticks.__setitem__(0,ticks[0]+delay))
+            self.assertTrue(result['ready'])
+            self.assertEqual(len(packets),2)
+            self.assertTrue(all(p['status']=='absent' and p['trigger']['armed'] is False
+                                and p['trigger']['eligible'] is False for p in packets))
+            self.assertEqual(gcv.encode(dict(packets[0],seq=42,sent_at=time.time()),True)[4:6],b'\x00\x00')
+        finally:client.close()
+
+    def test_receiver_or_old_heartbeat_alone_cannot_pass(self):
+        for hardware,sequence in [('not verified',None),('heartbeat verified',1)]:
+            client=BridgeClient(26740);ticks=[0.0];client.clock=lambda:ticks[0]
+            try:
+                with patch.object(client,'send',return_value=dict(receiver='receiving',
+                        hardware=hardware,device_sequence=sequence)):
+                    result=client.probe(timeout=.2,sleep=lambda delay:ticks.__setitem__(0,ticks[0]+delay))
+                self.assertFalse(result['ready'])
+            finally:client.close()

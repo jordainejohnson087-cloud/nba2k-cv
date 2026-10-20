@@ -172,3 +172,11 @@ The **Inference input size** dropdown changes `imgsz` between 640, 960 and 1280;
 ### Update notifications
 
 The app checks the published HTTPS release feed on launch and every five minutes while open. A newer release shows a nonmodal notification and an Install Update banner on every tab. Later dismisses the notification for that version until the next launch; the banner stays available. Installation waits until runs finish, verifies the download, preserves local models/settings/results, and restarts the app. Failed downloads can be retried. Existing installations need to install this version once from Updates → Check Online → Install Update to receive these notifications. This is periodic polling, not a push connection.
+
+### Gtuner startup and pre-capture readiness (2026102005)
+
+Select `Gtuner.exe` in the Titan Two tab and enable automatic Gtuner startup. With Titan bridge enabled, opening the app opens Gtuner with the matching GPC and CV worker files. It does **not** compile, flash, select a slot, or start the CV worker automatically. Gtuner's documented command-line behavior opens compatible files; no supported external slot-programming API has been verified.
+
+One-time hardware setup: install `titan_meter.gpc` to an unused slot in Gtuner IV, select it, and enable **Recall loaded memory slot between power cycles** under Device Configuration. Start `gtuner_meter.py` in Gtuner Computer Vision, using a Null or separate display source rather than the app's capture card. Source updates still require reinstalling the GPC through Gtuner. The app's GPC remains uncompiled and untested on physical Titan Two hardware here.
+
+**Prepare / Check Bridge** sends unarmed, absent-meter v2 packets for up to five seconds and waits for a fresh heartbeat echoing a randomly seeded packet sequence. A software acknowledgement or an unrelated diagnostic heartbeat is insufficient. Starting capture with Titan bridge enabled repeats this check and refuses to open capture if it fails. Detection-only capture remains available with the bridge disabled. The check verifies local transport and device payload consumption, not controller authentication, console actions, timing accuracy, or successful shots. Existing stale-packet cancellation still applies during capture. The bridge has its own lightweight Gtuner runtime; CUDA stays in the desktop app.

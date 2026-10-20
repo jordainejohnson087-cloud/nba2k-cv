@@ -66,16 +66,29 @@ def main():
                     assert saved['model']==str(alternative.resolve())
                     assert str(model) in saved['known_models']
                     assert str(app.model_menu.cget('state'))=='readonly'
+                # Gtuner receives exact script paths, without a shell or invented slot flags.
+                gtuner=out/'Gtuner.exe';gtuner.write_bytes(b'test-only')
+                app.gtuner_path.set(str(gtuner));app.auto_gtuner.set(True)
+                with patch.object(app,'_export_bridge',return_value=out),patch.object(app_module.subprocess,'Popen') as launch:
+                    app._launch_gtuner()
+                    assert launch.call_args.args[0]==[str(gtuner),str(out/'titan_meter.gpc'),str(out/'gtuner_meter.py')]
+                    assert app.gtuner_launched
+                # Bridged capture must prepare first, without starting the detector.
+                app.model.set(str(model));app.bridge_enabled.set(True)
+                with patch.object(app,'_prepare_bridge') as prepare,patch.object(app,'_start') as start:
+                    app._live()
+                    prepare.assert_called_once_with(for_capture=True)
+                    start.assert_not_called()
                 app.model.set(str(model));app.environment.set(sys.executable)
                 app.seconds.set('0');app.compute.set('0');app.bridge_enabled.set(True)
                 with patch.object(app,'_save'),patch.object(app,'_out',return_value=out),patch.object(app,'_start') as start:
-                    app._live()
+                    app._live(bridge_ready=True)
                     command=start.call_args.args[0]
                     assert command[0]==sys.executable
                     assert command[command.index('--seconds')+1]=='0.0'
                     assert command[command.index('--device')+1]=='0'
                     assert command[command.index('--imgsz')+1]=='1280'
-                    app.imgsz.set('640');app._live()
+                    app.imgsz.set('640');app._live(bridge_ready=True)
                     trial=start.call_args.args[0]
                     assert trial[trial.index('--imgsz')+1]=='640'
                     assert trial[trial.index('--model')+1]==str(model)

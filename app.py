@@ -71,6 +71,8 @@ class Desktop(tk.Tk):
         self.preview_image=None
         self.last_preview_stamp=None
         self.importing_model=False
+        self.preparing_bridge=False
+        self.gtuner_launched=False
         self.messages=queue.Queue()
         saved=load_settings()
         self.known_models=list(saved.get('known_models',[]))
@@ -98,6 +100,9 @@ class Desktop(tk.Tk):
         self.compute=tk.StringVar(value=saved.get('compute','auto'))
         self.controller=tk.StringVar(value=saved.get('controller','Xbox / GameSir'))
         self.bridge_enabled=tk.BooleanVar(value=saved.get('bridge_enabled',False))
+        self.gtuner_path=tk.StringVar(value=saved.get('gtuner_path',''))
+        self.auto_gtuner=tk.BooleanVar(value=saved.get('auto_gtuner',True))
+        self.bridge_setup_status=tk.StringVar(value='Not checked — install the script in Gtuner once')
         self.bridge_status=tk.StringVar(value='Bridge off • Titan Two hardware not verified')
         self.live_metrics=tk.StringVar(value='Preview idle')
         try:green=green_config(saved.get('green',{}))
@@ -118,6 +123,7 @@ class Desktop(tk.Tk):
         self._build()
         self.after(100,self._poll)
         self.after(500,lambda:self._check_online(silent=True))
+        self.after(1000,self._startup_bridge)
         self.after(300000,self._periodic_update_check)
         self.protocol('WM_DELETE_WINDOW',self._close)
 
@@ -288,18 +294,25 @@ class Desktop(tk.Tk):
         self.tabs.add(self.bridge_tab,text='Titan Two')
         ttk.Label(self.bridge_tab,text='Titan Two / Gtuner bridge',font=('Segoe UI',14,'bold')).pack(anchor='w',pady=8)
         ttk.Label(self.bridge_tab,text=(
-            '1. Connect Titan Two PROG to the PC and your controller to Titan Two INPUT-A.\n\n'
-            '2. In Gtuner IV, compile bridge/titan_meter.gpc and run it on Titan Two.\n\n'
-            '3. Open bridge/gtuner_meter.py in Gtuner Computer Vision. Select a display/video source '
-            'that does not compete with the app capture card. Start the GCV worker.\n\n'
-            '4. In Live Detection, choose your trained weight, CUDA Python environment, and controller profile. '
-            'Enable the bridge and start detection.\n\n'
-            'The app uses CUDA independently of Gtuner’s Python runtime. The Gtuner worker needs no PyTorch. '
-            'Receiver acknowledgements verify the local software link. A changing GPC heartbeat verifies the device return path. '
-            'Neither proves the console received meter data. Controller profile is a manual selection, not device discovery.\n\n'
-            'Telemetry expires after 250 ms in Gtuner. Predicted boxes have no measured fill. '
-            'titan_meter.gpc requires a physical Square / Xbox X hold and a fresh green event. Validate the color detector in dry-run mode before enabling its trigger.'),
+            'Connect Titan Two PROG to the PC, OUTPUT to the console, and the controller to INPUT-A.\n'
+            'One-time setup: install titan_meter.gpc to an unused Gtuner memory slot and select it. '
+            'Enable “Recall loaded memory slot between power cycles” in Gtuner Device Configuration.\n'
+            'Start gtuner_meter.py in Gtuner Computer Vision with a Null or separate display source. '
+            'Do not open the same capture card in both apps.\n'
+            'This app can open Gtuner and the matching files automatically. It cannot flash or select a slot through a verified API yet. '
+            'Before bridged capture, it checks a fresh, unarmed v2 payload echo from the Titan script. '
+            'This proves the bridge round trip, not console action or shot accuracy.'),
             wraplength=960,justify='left').pack(anchor='w',pady=10)
+        launcher=ttk.LabelFrame(self.bridge_tab,text='Startup and bridge readiness',padding=10)
+        launcher.pack(fill='x',pady=6)
+        row=ttk.Frame(launcher);row.pack(fill='x')
+        ttk.Label(row,text='Gtuner IV executable').pack(side='left',padx=(0,8))
+        ttk.Entry(row,textvariable=self.gtuner_path).pack(side='left',fill='x',expand=True)
+        ttk.Button(row,text='Browse',command=self._browse_gtuner).pack(side='left',padx=8)
+        ttk.Checkbutton(launcher,text='Open Gtuner on app startup when Titan bridge is enabled',
+            variable=self.auto_gtuner,command=self._save).pack(anchor='w',pady=5)
+        ttk.Button(launcher,text='Prepare / Check Bridge',command=self._prepare_bridge).pack(anchor='w')
+        ttk.Label(launcher,textvariable=self.bridge_setup_status,wraplength=940).pack(anchor='w',pady=6)
         calibration=ttk.LabelFrame(self.bridge_tab,text='Green detection and stick flick',padding=10)
         calibration.pack(fill='x',pady=8)
         fields=[('Hue low','hue_low'),('Hue high','hue_high'),('Saturation min','saturation_min'),
@@ -361,7 +374,7 @@ class Desktop(tk.Tk):
         self._refresh_choices()
         self._input_changed()
 
-    def _open_bridge(self):
+    def _export_bridge(self):
         # Source checkouts have these files; release builds embed them to stay
         # compatible with the first desktop updater's fixed filename allowlist.
         folder=PROJECT/'bridge'
@@ -371,7 +384,53 @@ class Desktop(tk.Tk):
             (folder/'gtuner_meter.py').write_text(GTUNER_SOURCE,encoding='utf-8')
             (folder/'titan_heartbeat.gpc').write_text(HEARTBEAT_SOURCE,encoding='utf-8')
             (folder/'titan_meter.gpc').write_text(METER_GPC_SOURCE,encoding='utf-8')
-        self._open_path(folder)
+        if not (folder/'titan_meter.gpc').is_file() or not (folder/'gtuner_meter.py').is_file():
+            raise FileNotFoundError('The matching bridge scripts are missing; install the latest app update.')
+        return folder
+
+    def _open_bridge(self):
+        self._open_path(self._export_bridge())
+
+    def _browse_gtuner(self):
+        chosen=filedialog.askopenfilename(title='Select Gtuner IV executable',filetypes=[('Gtuner IV','Gtuner.exe'),('Executable','*.exe')])
+        if chosen:
+            self.gtuner_path.set(chosen);self._save()
+
+    def _startup_bridge(self):
+        if self.bridge_enabled.get() and self.auto_gtuner.get():self._prepare_bridge()
+
+    def _launch_gtuner(self):
+        folder=self._export_bridge()
+        if not self.auto_gtuner.get():return
+        executable=Path(self.gtuner_path.get())
+        if sys.platform!='win32':raise RuntimeError('Gtuner startup is supported on Windows only.')
+        if not executable.is_file() or executable.name.lower()!='gtuner.exe':
+            raise ValueError('Select Gtuner.exe in the Titan Two tab, then Prepare / Check Bridge.')
+        subprocess.Popen([str(executable),str(folder/'titan_meter.gpc'),str(folder/'gtuner_meter.py')],cwd=executable.parent)
+        self.gtuner_launched=True
+
+    def _prepare_bridge(self,for_capture=False):
+        if self._busy():return
+        self._save()
+        try:
+            if not for_capture or not self.gtuner_launched:self._launch_gtuner()
+        except (OSError,ValueError,RuntimeError) as exc:
+            self.bridge_setup_status.set(str(exc))
+            if for_capture:messagebox.showerror('Bridge setup needed',str(exc))
+            return
+        self.preparing_bridge=True
+        self.bridge_setup_status.set('Checking Gtuner and Titan script payload echo...')
+        def work():
+            client=None
+            try:
+                from run_live import BridgeClient
+                client=BridgeClient(26740)
+                result=client.probe()
+                self.messages.put(('bridge_prepared',(for_capture,result,None)))
+            except Exception as exc:self.messages.put(('bridge_prepared',(for_capture,None,str(exc))))
+            finally:
+                if client is not None:client.close()
+        threading.Thread(target=work,daemon=True).start()
 
     def _green_values(self):
         defaults=green_config()
@@ -508,6 +567,7 @@ class Desktop(tk.Tk):
             width=self.width.get(),height=self.height.get(),fps=self.fps.get(),
             imgsz=self.imgsz.get(),seconds=self.seconds.get(),environment=self.environment.get(),
             compute=self.compute.get(),controller=self.controller.get(),bridge_enabled=self.bridge_enabled.get(),
+            gtuner_path=self.gtuner_path.get(),auto_gtuner=self.auto_gtuner.get(),
             green=dict(green,armed=False)),indent=2),encoding='utf-8')
 
     def _out(self,prefix):
@@ -520,6 +580,9 @@ class Desktop(tk.Tk):
         return out
 
     def _busy(self):
+        if self.preparing_bridge:
+            messagebox.showinfo('Bridge check active','Wait for the bridge check to finish first.')
+            return True
         if self.updating:
             messagebox.showinfo("Update in progress","Wait for the update to finish first.")
             return True
@@ -537,7 +600,7 @@ class Desktop(tk.Tk):
                  '--capture-fps',str(fps),'--fourcc','MJPG','--seconds',str(seconds)] +
                 (['--dshow'] if sys.platform=='win32' else []))
 
-    def _live(self):
+    def _live(self,bridge_ready=False):
         if self._busy():return
         values=self._settings()
         if not values:return
@@ -547,6 +610,9 @@ class Desktop(tk.Tk):
         model=Path(self.model.get())
         if not model.is_file():
             messagebox.showerror('Model missing','Select your trained best.pt file first.');return
+        if self.bridge_enabled.get() and not bridge_ready:
+            self._prepare_bridge(for_capture=True)
+            return
         self._save()
         out=self._out('live')
         executable=self._python()
@@ -641,6 +707,16 @@ class Desktop(tk.Tk):
                     self.status.set(f'{len(self.catalog)} available weights in the model library')
                 elif kind=='models_error':
                     self.finding_models=False;self.status.set('Model search failed: '+value)
+                elif kind=='bridge_prepared':
+                    self.preparing_bridge=False
+                    capture,result,error=value
+                    ready=bool(result and result.get('ready'))
+                    detail=('Bridge ready — fresh v2 Titan payload echo verified; console unverified.' if ready else
+                        'Bridge not ready — '+(error or f"{result['receiver']}; {result['hardware']}. Select the meter slot and start the Gtuner CV worker, then retry."))
+                    self.bridge_setup_status.set(detail)
+                    if capture:
+                        if ready:self._live(bridge_ready=True)
+                        else:messagebox.showerror('Capture not started',detail)
                 elif kind=='release':
                     self.checking_updates=False
                     self._handle_release(value)
