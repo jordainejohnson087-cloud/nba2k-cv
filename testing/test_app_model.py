@@ -32,4 +32,36 @@ class ModelImportTests(unittest.TestCase):
             self.assertEqual(list(target.parent.glob('*.partial')),[])
 
 
+class ModelCatalogTests(unittest.TestCase):
+    def test_catalog_distinguishes_best_weights_and_deduplicates_paths(self):
+        from app_model import model_catalog
+        with tempfile.TemporaryDirectory() as root:
+            project=Path(root)
+            first=project/'runs'/'meter_v2_gpu_1280-6'/'weights'/'best.pt'
+            second=project/'runs'/'meter_candidate'/'weights'/'best.pt'
+            for item in (first,second):item.parent.mkdir(parents=True);item.write_bytes(b'weight')
+            catalog=model_catalog(project,[str(first),str(first)])
+            self.assertEqual(len(catalog),2)
+            self.assertEqual(len({item['label'] for item in catalog}),2)
+            self.assertIn('meter_v2_gpu_1280-6 / best.pt',[item['label'] for item in catalog])
+            self.assertEqual({item['path'] for item in catalog},{str(first),str(second)})
+
+    def test_catalog_skips_missing_empty_and_nonweight_files(self):
+        from app_model import model_catalog
+        with tempfile.TemporaryDirectory() as root:
+            project=Path(root)
+            empty=project/'empty.pt';empty.touch()
+            text=project/'notes.txt';text.write_text('not a weight')
+            self.assertEqual(model_catalog(project,[str(empty),str(text),str(project/'missing.pt')]),[])
+
+    def test_same_display_names_receive_unique_labels(self):
+        from app_model import model_catalog
+        with tempfile.TemporaryDirectory() as root:
+            project=Path(root);paths=[]
+            for name in ('one','two'):
+                path=project/name/'shared'/'best.pt';path.parent.mkdir(parents=True);path.write_bytes(b'weight');paths.append(str(path))
+            catalog=model_catalog(project,paths)
+            self.assertEqual(len({item['label'] for item in catalog}),2)
+
+
 if __name__=='__main__':unittest.main()

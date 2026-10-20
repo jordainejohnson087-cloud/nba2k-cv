@@ -42,3 +42,33 @@ def import_model(source, project):
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+def model_catalog(project, known_paths=()):
+    """List real weights without loading pickle data or guessing training settings."""
+    project=Path(project)
+    candidates=list(known_paths)
+    for folder in (project/'models',project/'runs'):
+        if folder.is_dir():
+            candidates.extend(folder.rglob('*.pt'))
+    entries=[];seen=set();labels={}
+    for value in candidates:
+        if not value:continue
+        try:
+            path=Path(value).resolve(strict=True)
+            key=os.path.normcase(str(path))
+            if key in seen or not path.is_file() or path.suffix.lower()!='.pt':continue
+            size=path.stat().st_size
+            if not size:continue
+            seen.add(key)
+            if path.parent.name=='weights':
+                title=f'{path.parent.parent.name} / {path.name}'
+            elif path.parent==project.resolve()/'models':
+                title=f'App models / {path.name}'
+            else:
+                title=f'{path.parent.name} / {path.name}'
+            count=labels.get(title,0)+1;labels[title]=count
+            label=title if count==1 else f'{title} ({count})'
+            entries.append(dict(label=label,path=str(path),size_bytes=size))
+        except (OSError,ValueError):continue
+    return entries

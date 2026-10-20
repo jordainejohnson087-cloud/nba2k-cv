@@ -49,3 +49,9 @@ jobs:
           Push-Location test_results\bundle
           ..\..\.venv\Scripts\python.exe -c "import run_live; assert run_live.GTUNER_SOURCE; assert run_live.HEARTBEAT_SOURCE; print('Bundled runtime imported')"
           Pop-Location
+      - name: Upload desktop design preview
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-design-preview
+          path: test_results/ui_preview.png
+          retention-days: 7

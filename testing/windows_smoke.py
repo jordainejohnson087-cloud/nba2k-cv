@@ -26,12 +26,31 @@ def main():
             app.update_idletasks()
             app.update()
             names = [app.tabs.tab(i, 'text') for i in range(app.tabs.index('end'))]
-            required = {'Live Detection', 'Titan Two', 'Results', 'Updates', 'Improve Model'}
+            required = {'Models', 'Live Detection', 'Titan Two', 'Results', 'Updates', 'Improve Model'}
             if not required.issubset(names):
                 raise AssertionError(f'Missing app tabs: {required - set(names)}')
+            from PIL import ImageGrab
+            app.lift();app.update()
+            screenshot=Path('test_results')/'ui_preview.png'
+            screenshot.parent.mkdir(exist_ok=True)
+            ImageGrab.grab(bbox=(app.winfo_rootx(),app.winfo_rooty(),
+                app.winfo_rootx()+app.winfo_width(),app.winfo_rooty()+app.winfo_height())).save(screenshot)
             # Check selected runtime, untimed launch and safe Stop without hardware.
             with tempfile.TemporaryDirectory() as folder:
                 out=Path(folder);model=out/'best.pt';model.write_bytes(b'test-only')
+                import app as app_module
+                alternative=out/'runs'/'candidate'/'weights'/'best.pt'
+                alternative.parent.mkdir(parents=True);alternative.write_bytes(b'test-only')
+                app.model.set(str(model))
+                with patch.object(app_module,'PROJECT',out),patch.object(app_module,'SETTINGS',out/'settings.json'):
+                    app._refresh_choices()
+                    choice=next(label for label,path in app.model_choices.items() if path==str(alternative))
+                    app.model_choice.set(choice);app._select_model()
+                    assert app.model.get()==str(alternative)
+                    saved=json.loads((out/'settings.json').read_text())
+                    assert saved['model']==str(alternative)
+                    assert str(model) in saved['known_models']
+                    assert str(app.model_menu.cget('state'))=='readonly'
                 app.model.set(str(model));app.environment.set(sys.executable)
                 app.seconds.set('0');app.compute.set('0');app.bridge_enabled.set(True)
                 with patch.object(app,'_save'),patch.object(app,'_out',return_value=out),patch.object(app,'_start') as start:
@@ -40,6 +59,12 @@ def main():
                     assert command[0]==sys.executable
                     assert command[command.index('--seconds')+1]=='0.0'
                     assert command[command.index('--device')+1]=='0'
+                    assert command[command.index('--imgsz')+1]=='1280'
+                    app.imgsz.set('640');app._live()
+                    trial=start.call_args.args[0]
+                    assert trial[trial.index('--imgsz')+1]=='640'
+                    assert trial[trial.index('--model')+1]==str(model)
+                    app.imgsz.set('1280')
                     assert '--ui-preview' in command and '--bridge-port' in command
                     assert '--green-settings' in command
                     assert json.loads((out/'green_settings.json').read_text())['armed'] is False

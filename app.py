@@ -13,7 +13,7 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 from app_update import (apply_update, configured_feed, current_version,
                         download_release, fetch_manifest, newest_download)
-from app_model import import_model, managed_model
+from app_model import import_model, managed_model, model_catalog
 from run_live import green_config
 
 
@@ -62,8 +62,9 @@ class Desktop(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(f'NBA 2K Meter CV  •  {current_version(PROJECT)}')
-        self.geometry('1120x900')
-        self.minsize(820,600)
+        self.geometry(f'{min(1280,self.winfo_screenwidth()-40)}x{min(900,self.winfo_screenheight()-80)}')
+        self.minsize(1000,680)
+        self._theme()
         self.process=None
         self.active_out=None
         self.live_active=False
@@ -72,14 +73,26 @@ class Desktop(tk.Tk):
         self.importing_model=False
         self.messages=queue.Queue()
         saved=load_settings()
+        self.known_models=list(saved.get('known_models',[]))
+        self.known_environments=list(saved.get('known_environments',[]))
+        self.model_choices={}
+        self.catalog=[]
         saved_model=Path(saved.get('model','')) if saved.get('model') else None
         found=saved_model if saved_model and saved_model.is_file() else discover_model()
         self.model=tk.StringVar(value=str(found) if found else '')
+        self.model_choice=tk.StringVar()
+        self.model_detail=tk.StringVar(value='Add your trained .pt weight to begin.')
+        self.input_hint=tk.StringVar()
+        self.capture_fps_label=tk.StringVar(value='—')
+        self.inference_label=tk.StringVar(value='—')
+        self.observation_label=tk.StringVar(value='IDLE')
+        self.model.trace_add('write',lambda *_:self._model_changed())
         self.source=tk.StringVar(value=saved.get('source','0'))
         self.width=tk.StringVar(value=saved.get('width','1920'))
         self.height=tk.StringVar(value=saved.get('height','1080'))
         self.fps=tk.StringVar(value=saved.get('fps','60'))
         self.imgsz=tk.StringVar(value=saved.get('imgsz','1280'))
+        self.imgsz.trace_add('write',lambda *_:self._input_changed())
         self.seconds=tk.StringVar(value=saved.get('seconds','0'))
         self.environment=tk.StringVar(value=saved.get('environment',sys.executable))
         self.compute=tk.StringVar(value=saved.get('compute','auto'))
@@ -103,6 +116,71 @@ class Desktop(tk.Tk):
         self.after(500,lambda:self._check_online(silent=True))
         self.protocol('WM_DELETE_WINDOW',self._close)
 
+    def _theme(self):
+        self.configure(background='#0b1118')
+        style=ttk.Style(self)
+        style.theme_use('clam')
+        style.configure('.',font=('Segoe UI',10),background='#0b1118',foreground='#e6edf5')
+        style.configure('TFrame',background='#0b1118')
+        style.configure('Card.TFrame',background='#131e2b')
+        style.configure('TLabel',background='#0b1118',foreground='#e6edf5')
+        style.configure('Card.TLabel',background='#131e2b',foreground='#e6edf5')
+        style.configure('Muted.TLabel',foreground='#9aabbf')
+        style.configure('CardMuted.TLabel',background='#131e2b',foreground='#9aabbf')
+        style.configure('Brand.TLabel',font=('Segoe UI',22,'bold'))
+        style.configure('Section.TLabel',font=('Segoe UI',11,'bold'),background='#131e2b')
+        style.configure('Metric.TLabel',font=('Segoe UI',23,'bold'),background='#131e2b',foreground='#55ddbc')
+        style.configure('Video.TLabel',background='#080d13',foreground='#8798aa',font=('Segoe UI',12))
+        style.configure('TButton',background='#203044',foreground='#e6edf5',padding=(12,8),borderwidth=0)
+        style.map('TButton',background=[('active','#2c425b')],foreground=[('disabled','#677689')])
+        style.configure('Accent.TButton',background='#52ddba',foreground='#07231c',font=('Segoe UI',10,'bold'))
+        style.map('Accent.TButton',background=[('active','#80eed1')],foreground=[('disabled','#677689')])
+        style.configure('Stop.TButton',background='#4e2634',foreground='#ffb5c3')
+        style.configure('TEntry',fieldbackground='#1a293a',foreground='#e6edf5',insertcolor='#e6edf5',padding=6)
+        style.configure('TCombobox',fieldbackground='#1a293a',foreground='#e6edf5',background='#24364b',padding=6)
+        style.map('TCombobox',fieldbackground=[('readonly','#1a293a')],foreground=[('readonly','#e6edf5')],
+                  selectbackground=[('readonly','#1a293a')],selectforeground=[('readonly','#e6edf5')])
+        style.configure('TCheckbutton',background='#131e2b',foreground='#e6edf5',padding=(0,4))
+        style.map('TCheckbutton',background=[('active','#131e2b')])
+        style.configure('TNotebook',background='#0b1118',borderwidth=0)
+        style.configure('TNotebook.Tab',background='#142131',foreground='#a5b6c8',padding=(18,11))
+        style.map('TNotebook.Tab',background=[('selected','#22384a')],foreground=[('selected','#61e5c5')])
+        style.configure('TLabelframe',background='#131e2b',bordercolor='#2a3b4f',padding=12)
+        style.configure('TLabelframe.Label',background='#131e2b',foreground='#61e5c5')
+        style.configure('Treeview',background='#131e2b',fieldbackground='#131e2b',foreground='#e6edf5',rowheight=34,borderwidth=0)
+        style.configure('Treeview.Heading',background='#203044',foreground='#b8c7d7',padding=8)
+        style.map('Treeview',background=[('selected','#235448')],foreground=[('selected','#ffffff')])
+        self.option_add('*TCombobox*Listbox.background','#1a293a')
+        self.option_add('*TCombobox*Listbox.foreground','#e6edf5')
+        self.option_add('*TCombobox*Listbox.selectBackground','#235448')
+
+    def _card(self,parent,title):
+        card=ttk.Frame(parent,style='Card.TFrame',padding=16)
+        card.pack(fill='x',pady=(0,12))
+        ttk.Label(card,text=title,style='Section.TLabel').pack(anchor='w',pady=(0,10))
+        return card
+
+    def _scroll_panel(self,parent,width=350):
+        outer=ttk.Frame(parent,width=width)
+        outer.grid_propagate(False)
+        outer.columnconfigure(0,weight=1);outer.rowconfigure(0,weight=1)
+        canvas=tk.Canvas(outer,background='#0b1118',highlightthickness=0,width=width)
+        canvas.grid(row=0,column=0,sticky='nsew')
+        bar=ttk.Scrollbar(outer,orient='vertical',command=canvas.yview)
+        bar.grid(row=0,column=1,sticky='ns');canvas.configure(yscrollcommand=bar.set)
+        content=ttk.Frame(canvas)
+        item=canvas.create_window((0,0),window=content,anchor='nw')
+        content.bind('<Configure>',lambda event:canvas.configure(scrollregion=canvas.bbox('all')))
+        canvas.bind('<Configure>',lambda event:canvas.itemconfigure(item,width=event.width))
+        def wheel(event):
+            current=self.winfo_containing(event.x_root,event.y_root)
+            while current is not None:
+                if current==content:
+                    canvas.yview_scroll(-1 if event.delta>0 else 1,'units');return
+                current=getattr(current,'master',None)
+        self.bind_all('<MouseWheel>',wheel,add='+')
+        return outer,content
+
     def _row(self,parent,title,var,browse=None):
         row=ttk.Frame(parent);row.pack(fill='x',pady=5)
         ttk.Label(row,text=title,width=20).pack(side='left')
@@ -110,54 +188,90 @@ class Desktop(tk.Tk):
         if browse: ttk.Button(row,text='Browse',command=browse).pack(side='left',padx=6)
 
     def _build(self):
-        self.tabs=ttk.Notebook(self);self.tabs.pack(fill='both',expand=True,padx=12,pady=10)
-        live=ttk.Frame(self.tabs,padding=14);self.tabs.add(live,text='Live Detection')
-        model_row=ttk.Frame(live);model_row.pack(fill='x',pady=5)
-        ttk.Label(model_row,text='Model best.pt',width=20).pack(side='left')
-        self.model_menu=ttk.Combobox(model_row,textvariable=self.model)
-        self.model_menu.pack(side='left',fill='x',expand=True)
-        self.model_menu.bind('<<ComboboxSelected>>',lambda event:self._save())
-        ttk.Button(model_row,text='Auto Find',command=self._auto_find).pack(side='left',padx=4)
-        ttk.Button(model_row,text='Browse',command=self._choose_model).pack(side='left',padx=4)
-        ttk.Button(model_row,text='Import to App',command=self._import_model).pack(side='left',padx=4)
-        self._row(live,'Capture source',self.source)
-        env_row=ttk.Frame(live);env_row.pack(fill='x',pady=5)
-        ttk.Label(env_row,text='Python environment',width=20).pack(side='left')
-        self.environment_menu=ttk.Combobox(env_row,textvariable=self.environment)
-        self.environment_menu.pack(side='left',fill='x',expand=True)
-        ttk.Button(env_row,text='Browse Python',command=self._choose_environment).pack(side='left',padx=4)
-        ttk.Button(env_row,text='Refresh choices',command=self._refresh_choices).pack(side='left',padx=4)
-        runtime=ttk.Frame(live);runtime.pack(fill='x',pady=5)
-        ttk.Label(runtime,text='Compute').pack(side='left')
-        ttk.Combobox(runtime,textvariable=self.compute,values=('auto','0','cpu'),state='readonly',width=8).pack(side='left',padx=6)
-        ttk.Label(runtime,text='0 = CUDA GPU 0    Controller profile').pack(side='left')
-        ttk.Combobox(runtime,textvariable=self.controller,
-            values=('Xbox / GameSir','Xbox Elite','DualSense','DualShock 4','Generic HID'),
-            state='readonly',width=20).pack(side='left',padx=6)
-        ttk.Checkbutton(runtime,text='Enable Titan Two bridge',variable=self.bridge_enabled).pack(side='left')
-        ttk.Label(live,textvariable=self.bridge_status,wraplength=1000).pack(anchor='w',pady=3)
-        ttk.Button(live,text='Open Titan Two Setup',command=lambda:self.tabs.select(self.bridge_tab)).pack(anchor='w')
-        mode=ttk.Frame(live);mode.pack(fill='x',pady=5)
-        for title,var in [('Width',self.width),('Height',self.height),('Capture FPS',self.fps),
-                          ('Model input',self.imgsz),('Seconds (0=until Stop)',self.seconds)]:
-            ttk.Label(mode,text=title).pack(side='left',padx=(8,3))
-            ttk.Entry(mode,textvariable=var,width=8).pack(side='left')
-        flags=ttk.Frame(live);flags.pack(fill='x',pady=8)
-        ttk.Checkbutton(flags,text='Show preview',variable=self.preview).pack(side='left',padx=8)
-        ttk.Checkbutton(flags,text='Save annotated replay',variable=self.record).pack(side='left',padx=8)
-        ttk.Checkbutton(flags,text='Save raw training footage',variable=self.raw).pack(side='left',padx=8)
-        buttons=ttk.Frame(live);buttons.pack(fill='x',pady=6)
-        ttk.Button(buttons,text='Start Live Test',command=self._live).pack(side='left',padx=4)
-        ttk.Button(buttons,text='Test Capture Only',command=self._probe).pack(side='left',padx=4)
-        ttk.Button(buttons,text='Check Setup',command=self._setup).pack(side='left',padx=4)
-        ttk.Button(buttons,text='Stop',command=self._stop).pack(side='left',padx=4)
-        ttk.Label(live,text='Raw recording may slow live detection. Each run creates its own results folder.',
-                  wraplength=800).pack(anchor='w',pady=6)
-        ttk.Label(live,textvariable=self.live_metrics).pack(anchor='w',pady=4)
-        self.screen=ttk.Label(live,text='Your capture preview will appear here',anchor='center')
-        self.screen.pack(fill='both',expand=True,pady=4)
-        self.log=scrolledtext.ScrolledText(live,height=5,state='disabled')
-        self.log.pack(fill='both',expand=True,pady=6)
+        header=ttk.Frame(self,padding=(22,16,22,12));header.pack(fill='x')
+        ttk.Label(header,text='METER LAB',style='Brand.TLabel').pack(side='left')
+        ttk.Label(header,text='  NBA 2K  /  VISION WORKSPACE',style='Muted.TLabel').pack(side='left',padx=12)
+        ttk.Label(header,text=f'v{current_version(PROJECT)}',style='Muted.TLabel').pack(side='right')
+        self.tabs=ttk.Notebook(self);self.tabs.pack(fill='both',expand=True,padx=18,pady=(0,12))
+        live=ttk.Frame(self.tabs,padding=(0,16,0,0));self.tabs.add(live,text='Live Detection')
+        live.columnconfigure(0,weight=0,minsize=350);live.columnconfigure(1,weight=1)
+        live.rowconfigure(0,weight=1)
+        sidebar,controls=self._scroll_panel(live)
+        sidebar.grid(row=0,column=0,sticky='nsew',padx=(0,14))
+        detector=self._card(controls,'01   DETECTOR')
+        ttk.Label(detector,text='Trained weight',style='CardMuted.TLabel').pack(anchor='w')
+        self.model_menu=ttk.Combobox(detector,textvariable=self.model_choice,state='readonly',width=26)
+        self.model_menu.pack(fill='x',pady=(5,7))
+        self.model_menu.bind('<<ComboboxSelected>>',self._select_model)
+        ttk.Label(detector,textvariable=self.model_detail,style='CardMuted.TLabel',wraplength=280).pack(anchor='w',pady=4)
+        choose=ttk.Frame(detector,style='Card.TFrame');choose.pack(fill='x',pady=6)
+        ttk.Button(choose,text='Add weight',command=self._choose_model).pack(side='left')
+        ttk.Button(choose,text='Find models',command=self._auto_find).pack(side='left',padx=6)
+        ttk.Label(detector,text='Inference input size',style='CardMuted.TLabel').pack(anchor='w',pady=(9,4))
+        self.input_menu=ttk.Combobox(detector,textvariable=self.imgsz,values=('640','960','1280'),state='readonly',width=12)
+        self.input_menu.pack(fill='x')
+        ttk.Label(detector,textvariable=self.input_hint,style='CardMuted.TLabel',wraplength=280).pack(anchor='w',pady=(7,0))
+        capture=self._card(controls,'02   CAPTURE')
+        ttk.Label(capture,text='Device index or stream URL',style='CardMuted.TLabel').pack(anchor='w')
+        ttk.Combobox(capture,textvariable=self.source,values=('0','1','2','3'),width=14).pack(fill='x',pady=(5,8))
+        sizes=ttk.Frame(capture,style='Card.TFrame');sizes.pack(fill='x')
+        for col,(title,var) in enumerate([('Width',self.width),('Height',self.height),('FPS',self.fps)]):
+            sizes.columnconfigure(col,weight=1)
+            ttk.Label(sizes,text=title,style='CardMuted.TLabel').grid(row=0,column=col,sticky='w')
+            ttk.Entry(sizes,textvariable=var,width=7).grid(row=1,column=col,sticky='ew',padx=(0,5),pady=4)
+        ttk.Label(capture,text='Duration in seconds  •  0 = until Stop',style='CardMuted.TLabel').pack(anchor='w',pady=(7,4))
+        ttk.Entry(capture,textvariable=self.seconds,width=10).pack(fill='x')
+        ttk.Checkbutton(capture,text='Show live preview',variable=self.preview).pack(anchor='w',pady=(8,0))
+        ttk.Checkbutton(capture,text='Save annotated replay',variable=self.record).pack(anchor='w')
+        ttk.Checkbutton(capture,text='Save raw training footage',variable=self.raw).pack(anchor='w')
+        runtime=self._card(controls,'03   RUNTIME & CONTROLLER')
+        ttk.Label(runtime,text='Python environment',style='CardMuted.TLabel').pack(anchor='w')
+        self.environment_menu=ttk.Combobox(runtime,textvariable=self.environment,width=26)
+        self.environment_menu.pack(fill='x',pady=5)
+        ttk.Button(runtime,text='Browse Python',command=self._choose_environment).pack(anchor='w',pady=(0,9))
+        ttk.Label(runtime,text='Compute  •  0 = CUDA GPU 0',style='CardMuted.TLabel').pack(anchor='w')
+        ttk.Combobox(runtime,textvariable=self.compute,values=('auto','0','cpu'),state='readonly').pack(fill='x',pady=5)
+        ttk.Label(runtime,text='Controller profile',style='CardMuted.TLabel').pack(anchor='w',pady=(6,0))
+        ttk.Combobox(runtime,textvariable=self.controller,values=('Xbox / GameSir','Xbox Elite','DualSense','DualShock 4','Generic HID'),state='readonly').pack(fill='x',pady=5)
+        ttk.Checkbutton(runtime,text='Enable Titan Two bridge',variable=self.bridge_enabled).pack(anchor='w',pady=5)
+        ttk.Button(runtime,text='Open bridge settings',command=lambda:self.tabs.select(self.bridge_tab)).pack(anchor='w')
+        work=ttk.Frame(live);work.grid(row=0,column=1,sticky='nsew')
+        work.columnconfigure(0,weight=1);work.rowconfigure(2,weight=1)
+        actions=ttk.Frame(work);actions.grid(row=0,column=0,sticky='ew',pady=(0,12))
+        ttk.Button(actions,text='▶  Start Live Test',style='Accent.TButton',command=self._live).pack(side='left')
+        ttk.Button(actions,text='■  Stop',style='Stop.TButton',command=self._stop).pack(side='left',padx=8)
+        ttk.Button(actions,text='Check Setup',command=self._setup).pack(side='right')
+        ttk.Button(actions,text='Test Capture Only',command=self._probe).pack(side='right',padx=8)
+        metrics=ttk.Frame(work);metrics.grid(row=1,column=0,sticky='ew',pady=(0,12))
+        for col,(title,var) in enumerate([('PROCESSED FPS',self.capture_fps_label),('INFERENCE',self.inference_label),('METER STATUS',self.observation_label)]):
+            metrics.columnconfigure(col,weight=1)
+            metric=ttk.Frame(metrics,style='Card.TFrame',padding=12)
+            metric.grid(row=0,column=col,sticky='nsew',padx=(0,8 if col<2 else 0))
+            ttk.Label(metric,text=title,style='CardMuted.TLabel').pack(anchor='w')
+            ttk.Label(metric,textvariable=var,style='Metric.TLabel').pack(anchor='w',pady=(5,0))
+        video=ttk.Frame(work,style='Card.TFrame',padding=14);video.grid(row=2,column=0,sticky='nsew')
+        video.columnconfigure(0,weight=1);video.rowconfigure(1,weight=1)
+        ttk.Label(video,text='LIVE CAPTURE',style='Section.TLabel').grid(row=0,column=0,sticky='w',pady=(0,10))
+        self.screen=ttk.Label(video,text='Ready for your capture\n\nChoose a weight, then start live detection.',style='Video.TLabel',anchor='center')
+        self.screen.grid(row=1,column=0,sticky='nsew')
+        ttk.Label(video,textvariable=self.live_metrics,style='CardMuted.TLabel',wraplength=650).grid(row=2,column=0,sticky='w',pady=(10,0))
+        ttk.Label(work,textvariable=self.bridge_status,style='Muted.TLabel',wraplength=700).grid(row=3,column=0,sticky='w',pady=10)
+        self.log=scrolledtext.ScrolledText(work,height=4,state='disabled',background='#0b141f',foreground='#9eb4ca',insertbackground='#e6edf5',relief='flat',font=('Consolas',9))
+        self.log.grid(row=4,column=0,sticky='ew')
+        models=ttk.Frame(self.tabs,padding=20);self.tabs.add(models,text='Models')
+        ttk.Label(models,text='Your model library',style='Brand.TLabel').pack(anchor='w')
+        ttk.Label(models,text='Choose a real .pt weight. Input size is selected separately in Live Detection.',style='Muted.TLabel').pack(anchor='w',pady=(6,16))
+        model_actions=ttk.Frame(models);model_actions.pack(fill='x',pady=(0,12))
+        for title,command in [('Add weight',self._choose_model),('Find models',self._auto_find),('Import to App',self._import_model),('Refresh',self._refresh_choices)]:
+            ttk.Button(model_actions,text=title,command=command).pack(side='left',padx=(0,8))
+        self.model_tree=ttk.Treeview(models,columns=('size','path'),show='tree headings',selectmode='browse')
+        self.model_tree.heading('#0',text='Model');self.model_tree.column('#0',width=300)
+        self.model_tree.heading('size',text='Size');self.model_tree.column('size',width=90,stretch=False)
+        self.model_tree.heading('path',text='File location');self.model_tree.column('path',width=450)
+        self.model_tree.pack(fill='both',expand=True,pady=8)
+        self.model_tree.bind('<Double-1>',self._use_library_model)
+        ttk.Button(models,text='Use selected weight',style='Accent.TButton',command=self._use_library_model).pack(anchor='w',pady=10)
+        ttk.Label(models,textvariable=self.model_detail,style='Muted.TLabel',wraplength=950).pack(anchor='w')
 
         self.bridge_tab=ttk.Frame(self.tabs,padding=20)
         self.tabs.add(self.bridge_tab,text='Titan Two')
@@ -203,7 +317,7 @@ class Desktop(tk.Tk):
         self.runs.pack(fill='both',expand=True,pady=8)
         self.runs.bind('<<TreeviewSelect>>',self._show_result)
         ttk.Button(results,text='Open Selected Folder',command=self._open_result).pack(anchor='w')
-        self.detail=scrolledtext.ScrolledText(results,height=11,state='disabled')
+        self.detail=scrolledtext.ScrolledText(results,height=11,state='disabled',background='#0b141f',foreground='#b0c3d8',relief='flat',font=('Consolas',10))
         self.detail.pack(fill='both',expand=True,pady=8)
 
         update=ttk.Frame(self.tabs,padding=20);self.tabs.add(update,text='Updates')
@@ -234,6 +348,7 @@ class Desktop(tk.Tk):
         ttk.Label(self,textvariable=self.status,anchor='w').pack(fill='x',padx=15,pady=(0,8))
         self._refresh()
         self._refresh_choices()
+        self._input_changed()
 
     def _open_bridge(self):
         # Source checkouts have these files; release builds embed them to stay
@@ -269,13 +384,54 @@ class Desktop(tk.Tk):
             filetypes=[("Python executable","python.exe"),("All files","*.*")])
         if chosen:self.environment.set(chosen);self._refresh_choices();self._save()
 
+    def _input_changed(self):
+        notes={'1280':'1280 • current baseline for the small meter.',
+               '960':'960 • compare speed and missed frames against 1280.',
+               '640':'640 • speed trial; validate small-meter recall before switching.'}
+        self.input_hint.set(notes.get(self.imgsz.get(),'Custom input size. Validate on held-out footage.'))
+
+    def _model_changed(self):
+        value=self.model.get()
+        entry=next((item for item in self.catalog if item['path']==value),None)
+        if entry:
+            self.model_choice.set(entry['label'])
+            self.model_detail.set(f"{entry['size_bytes']/1048576:.1f} MB  •  {entry['path']}")
+        elif value:
+            self.model_choice.set(Path(value).name)
+            self.model_detail.set(value)
+        else:
+            self.model_choice.set('No weights added')
+            self.model_detail.set('Add your trained .pt weight to begin.')
+
+    def _select_model(self,event=None):
+        if self._busy():self._model_changed();return
+        chosen=self.model_choices.get(self.model_choice.get())
+        if chosen:
+            self.model.set(chosen);self._save()
+            self.status.set('Selected weight: '+self.model_choice.get())
+
+    def _use_library_model(self,event=None):
+        selection=self.model_tree.selection()
+        if not selection:return
+        self.model_choice.set(self.model_tree.item(selection[0],'text'))
+        self._select_model()
+
     def _refresh_choices(self):
-        candidates=[self.environment.get(),sys.executable,
-            str(PROJECT/".venv"/("Scripts/python.exe" if sys.platform=="win32" else "bin/python"))]
-        self.environment_menu.configure(values=list(dict.fromkeys(p for p in candidates if Path(p).is_file())))
-        weights=[self.model.get()] + [str(p) for folder in (PROJECT/"models",PROJECT/"runs")
-            if folder.exists() for p in folder.rglob("*.pt")]
-        self.model_menu.configure(values=list(dict.fromkeys(p for p in weights if Path(p).is_file())))
+        candidates=[self.environment.get(),*self.known_environments,sys.executable,
+            str(PROJECT/'.venv'/('Scripts/python.exe' if sys.platform=='win32' else 'bin/python'))]
+        self.known_environments=list(dict.fromkeys(p for p in candidates if p))
+        self.environment_menu.configure(values=[p for p in self.known_environments if Path(p).is_file()])
+        self.known_models=list(dict.fromkeys([self.model.get(),*self.known_models]))
+        self.catalog=model_catalog(PROJECT,self.known_models)
+        self.model_choices={item['label']:item['path'] for item in self.catalog}
+        self.known_models=list(dict.fromkeys([*self.known_models,*(item['path'] for item in self.catalog)]))
+        self.model_menu.configure(values=list(self.model_choices))
+        for row in self.model_tree.get_children():self.model_tree.delete(row)
+        for index,item in enumerate(self.catalog):
+            self.model_tree.insert('','end',iid=str(index),text=item['label'],
+                values=(f"{item['size_bytes']/1048576:.1f} MB",item['path']))
+        if not Path(self.model.get()).is_file() and self.catalog:self.model.set(self.catalog[0]['path'])
+        self._model_changed()
 
     def _python(self):
         executable=Path(self.environment.get())
@@ -284,19 +440,23 @@ class Desktop(tk.Tk):
         return str(executable)
 
     def _choose_model(self):
+        if self._busy():return
         initial=Path(self.model.get()).parent if Path(self.model.get()).is_file() else Path.home()/'Downloads'
         self.lift()
-        path=filedialog.askopenfilename(parent=self,title='Select best.pt',initialdir=str(initial),
+        path=filedialog.askopenfilename(parent=self,title='Add trained meter weight',initialdir=str(initial),
             filetypes=[('PyTorch weights','*.pt'),('All files','*.*')])
         if path:self.model.set(path);self._refresh_choices();self._save()
 
     def _auto_find(self):
-        found=discover_model(deep=True)
-        if found:
-            self.model.set(str(found));self._refresh_choices();self._save()
-            self.status.set(f'Model found: {found}')
-        else:
-            messagebox.showinfo('Model not found','No best.pt was found in prior run logs or Downloads. Paste its full path in the model field.')
+        if getattr(self,'finding_models',False):return
+        self.finding_models=True
+        self.status.set('Searching Downloads for trained weights...')
+        def find():
+            try:
+                files=[str(p) for p in (Path.home()/'Downloads').rglob('*.pt') if p.is_file()]
+                self.messages.put(('models_found',files))
+            except OSError as exc:self.messages.put(('models_error',str(exc)))
+        threading.Thread(target=find,daemon=True).start()
 
     def _import_model(self):
         if self._busy() or self.importing_model:return
@@ -328,7 +488,10 @@ class Desktop(tk.Tk):
     def _save(self):
         try:green=self._green_values()
         except ValueError:green=load_settings().get('green',green_config())
-        SETTINGS.write_text(json.dumps(dict(model=self.model.get(),source=self.source.get(),
+        self.known_models=list(dict.fromkeys([self.model.get(),*self.known_models]))
+        self.known_environments=list(dict.fromkeys([self.environment.get(),*self.known_environments]))
+        SETTINGS.write_text(json.dumps(dict(model=self.model.get(),known_models=self.known_models,
+            known_environments=self.known_environments,source=self.source.get(),
             width=self.width.get(),height=self.height.get(),fps=self.fps.get(),
             imgsz=self.imgsz.get(),seconds=self.seconds.get(),environment=self.environment.get(),
             compute=self.compute.get(),controller=self.controller.get(),bridge_enabled=self.bridge_enabled.get(),
@@ -456,6 +619,12 @@ class Desktop(tk.Tk):
             while True:
                 kind,value=self.messages.get_nowait()
                 if kind=='text':self._log(value)
+                elif kind=='models_found':
+                    self.finding_models=False
+                    self.known_models.extend(value);self._refresh_choices();self._save()
+                    self.status.set(f'{len(self.catalog)} available weights in the model library')
+                elif kind=='models_error':
+                    self.finding_models=False;self.status.set('Model search failed: '+value)
                 elif kind=='release':
                     self.latest_release=value
                     if value:
@@ -492,6 +661,9 @@ class Desktop(tk.Tk):
             report=self.active_out/"live_status.json"
             data=json.loads(report.read_text(encoding="utf-8"))
             age=max(0,time.time()-data["timestamp"])
+            self.capture_fps_label.set(f"{data['fps']:.1f}")
+            self.inference_label.set(f"{data['inference_ms']:.1f} ms")
+            self.observation_label.set(data['status'].upper() if age<=1 else 'STALE')
             self.live_metrics.set(f"{data['fps']:.1f} processed FPS | inference {data['inference_ms']:.1f} ms | "
                 f"{data['status']} | preview age {age:.1f}s" + (" • STALE" if age>1 else ""))
             bridge=data.get("bridge")
@@ -507,7 +679,10 @@ class Desktop(tk.Tk):
             image=self.active_out/'preview.png'
             stamp=image.stat().st_mtime_ns
             if stamp!=self.last_preview_stamp:
-                self.preview_image=tk.PhotoImage(file=str(image))
+                photo=tk.PhotoImage(file=str(image))
+                width=max(1,self.screen.winfo_width());height=max(1,self.screen.winfo_height())
+                factor=max(1,(photo.width()+width-1)//width,(photo.height()+height-1)//height)
+                self.preview_image=photo.subsample(factor,factor)
                 self.screen.configure(image=self.preview_image,text="")
                 self.last_preview_stamp=stamp
         except (OSError,ValueError,KeyError,tk.TclError):pass
