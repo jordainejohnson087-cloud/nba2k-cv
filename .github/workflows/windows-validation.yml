@@ -4,6 +4,9 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/windows-validation.yml'
+      - 'scripts/**'
+      - 'live_link.py'
+      - 'bridge/**'
       - 'app.py'
       - 'app_model.py'
       - 'app_update.py'
@@ -37,3 +40,11 @@ jobs:
       - name: Start Windows GUI and inspect tabs
         shell: pwsh
         run: .\.venv\Scripts\python.exe testing\windows_smoke.py
+      - name: Build backwards-compatible update and import bundled runtime
+        shell: pwsh
+        run: |
+          .\.venv\Scripts\python.exe scripts\build_release.py --repository jordainejohnson087-cloud/nba2k-cv --out test_results\release.zip
+          Expand-Archive test_results\release.zip -DestinationPath test_results\bundle -Force
+          Push-Location test_results\bundle
+          ..\..\.venv\Scripts\python.exe -c "import run_live; assert run_live.GTUNER_SOURCE; assert run_live.HEARTBEAT_SOURCE; print('Bundled runtime imported')"
+          Pop-Location

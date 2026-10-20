@@ -1,0 +1,9 @@
+// Diagnostic heartbeat only. Controller inputs pass through unchanged.
+uint32 counter;
+main {
+    combo_run(Heartbeat);
+}
+combo Heartbeat {
+    wait(500);
+    printf("GCMD:ComputerVision.PY:T2CV:%d", counter++);
+}

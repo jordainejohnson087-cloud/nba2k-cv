@@ -25,6 +25,17 @@ def build(archive, repository):
         if not source.is_file() or source.is_symlink():
             raise ValueError(f'Required release file missing or linked: {name}')
         files[name] = source.read_bytes()
+    # First-generation installed updaters accept only their original filenames.
+    # Bundle pure-Python support into run_live.py, and adapter resources as
+    # literals, instead of shipping new archive members those clients reject.
+    live = files['run_live.py'].decode('utf-8')
+    live = live.replace('from live_link import BridgeClient, SnapshotPublisher',
+                        (ROOT/'live_link.py').read_text(encoding='utf-8'))
+    resources = '\nGTUNER_SOURCE = ' + repr((ROOT/'bridge/gtuner_meter.py').read_text(encoding='utf-8'))
+    resources += '\nHEARTBEAT_SOURCE = ' + repr((ROOT/'bridge/titan_heartbeat.gpc').read_text(encoding='utf-8')) + '\n'
+    live = live.replace("if __name__ == '__main__': main()", resources + "\nif __name__ == '__main__': main()")
+    compile(live, 'run_live.py', 'exec')
+    files['run_live.py'] = live.encode('utf-8')
     files['update_source.json'] = (json.dumps({'manifest_url': feed}) + '\n').encode()
     if sum(map(len, files.values())) > MAX_BYTES:
         raise ValueError('Release exceeds updater size limit')

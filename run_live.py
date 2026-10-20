@@ -12,6 +12,7 @@ from pathlib import Path
 
 from meter_core import Config, Detection, MeterTracker
 from run_video import estimate_fill
+from live_link import BridgeClient, SnapshotPublisher
 
 
 def open_capture(cv2, source, windows_dshow=False):
@@ -132,7 +133,11 @@ def run(args, cv2, torch, YOLO):
         fps = args.assumed_fps
     budget_ms = 1000/fps
     model = YOLO(str(args.model))
-    device = 0 if torch.cuda.is_available() else 'cpu'
+    requested_device = getattr(args, 'device', 'auto')
+    if requested_device == '0' and not torch.cuda.is_available():
+        cap.release()
+        raise RuntimeError('Selected environment cannot access CUDA. Run Check Setup or select Auto/CPU.')
+    device = (0 if torch.cuda.is_available() else 'cpu') if requested_device == 'auto' else (0 if requested_device == '0' else 'cpu')
     tracker = MeterTracker(Config(max_missed=args.max_missed))
     args.out.mkdir(parents=True, exist_ok=True)
     writer_video = None
@@ -146,6 +151,12 @@ def run(args, cv2, torch, YOLO):
     late_reads = 0
     missing_reads = 0
     reason = 'stopped'
+    bridge = BridgeClient(args.bridge_port) if getattr(args, 'bridge_port', 0) else None
+    bridge_status = None
+    ui_enabled = getattr(args, 'ui_preview', False)
+    publisher = SnapshotPublisher(args.out, cv2) if getattr(args,'ui_status',False) else None
+    last_snapshot = 0
+    stop_file = getattr(args, 'stop_file', None)
     start = time.perf_counter()
     last_read = None
     csv_path = args.out/'live_frames.csv'
@@ -157,6 +168,8 @@ def run(args, cv2, torch, YOLO):
             log = csv.DictWriter(file,fieldnames=fieldnames)
             log.writeheader()
             while True:
+                if stop_file and stop_file.exists():
+                    reason = 'user_stopped'; break
                 if args.max_frames and count >= args.max_frames:
                     reason = 'frame_limit'; break
                 if args.seconds and time.perf_counter()-start >= args.seconds:
@@ -164,6 +177,7 @@ def run(args, cv2, torch, YOLO):
                 read_start = time.perf_counter()
                 ok, frame = cap.read()
                 read_at = time.perf_counter()
+                captured_at = time.time()
                 read_ms = (read_at-read_start)*1000
                 stage_times['read_ms'].append(read_ms)
                 if not ok or frame is None:
@@ -197,13 +211,16 @@ def run(args, cv2, torch, YOLO):
                 detections = [Detection(tuple(float(v) for v in box),float(conf)) for box,conf in zip(
                     result.boxes.xyxy.cpu().tolist(),result.boxes.conf.cpu().tolist())] if result.boxes is not None else []
                 state = tracker.update(count,detections,lambda box:estimate_fill(frame,box,args.fill_top,args.fill_bottom))
+                if bridge is not None:
+                    bridge_status = bridge.send(state, observed_at=captured_at)
                 if state['ended']:
                     shots.append(state['ended'])
                 stop_requested = False
                 overlay_ms = preview_write_ms = 0.0
-                if not args.headless or args.record:
+                if not args.headless or args.record or (getattr(args,'ui_status',False) and read_at-last_snapshot >= .1):
                     overlay_start = time.perf_counter()
-                    overlay = draw_preview(cv2,frame,state,count,inference_ms,budget_ms)
+                    overlay = (draw_preview(cv2,frame,state,count,inference_ms,budget_ms)
+                               if not args.headless or args.record or ui_enabled else None)
                     overlay_ms = (time.perf_counter()-overlay_start)*1000
                     if args.record:
                         preview_start = time.perf_counter()
@@ -212,6 +229,12 @@ def run(args, cv2, torch, YOLO):
                             writer_video = WallClockRecorder(cv2,args.out/'live_preview.mp4',(w,h),fps)
                         writer_video.write(overlay,read_at-start)
                         preview_write_ms = (time.perf_counter()-preview_start)*1000
+                    if getattr(args,'ui_status',False) and read_at-last_snapshot >= .1:
+                        publisher.submit(dict(timestamp=captured_at, frame=count,
+                            elapsed_sec=read_at-start, fps=count/max(.001,read_at-start),
+                            inference_ms=inference_ms, device=str(device),
+                            status=state['status'], fill=state['fill'], bridge=bridge_status), overlay if ui_enabled else None)
+                        last_snapshot = read_at
                     if not args.headless:
                         cv2.imshow('NBA 2K meter detection (Q to stop)',overlay)
                         if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -235,6 +258,10 @@ def run(args, cv2, torch, YOLO):
                     reason = 'user_stopped'; break
     finally:
         cap.release()
+        if bridge is not None:
+            bridge.close()
+        if publisher is not None:
+            publisher.close()
         if writer_video is not None:
             writer_video.close(time.perf_counter()-start)
         if raw_writer is not None:
@@ -245,6 +272,8 @@ def run(args, cv2, torch, YOLO):
         shots.append(tracker.summary())
     elapsed = time.perf_counter()-start
     report = dict(source=source,model=str(args.model),device=str(device),frames=count,
+        bridge=bridge_status, ui_preview=ui_enabled,
+        preview_error=publisher.error if publisher else None,
         elapsed_sec=elapsed,measured_fps=count/elapsed if elapsed else 0,
         source_fps=fps,budget_ms=budget_ms,processing_over_budget_frames=over_budget,
         requested_capture=dict(width=args.width,height=args.height,fps=args.capture_fps,
@@ -294,11 +323,19 @@ def main():
     p.add_argument('--fill-bottom',type=float,default=.90)
     p.add_argument('--seconds',type=float,default=0)
     p.add_argument('--max-frames',type=int,default=0)
+    p.add_argument('--device',choices=['auto','0','cpu'],default='auto',help='Auto, CUDA GPU 0, or CPU')
+    p.add_argument('--ui-status',action='store_true',help='Publish live status to the desktop app')
+    p.add_argument('--ui-preview',action='store_true',help='Write a bounded 640px app preview at up to 10 FPS')
+    p.add_argument('--stop-file',type=Path,help='Stop gracefully when this file appears')
+    p.add_argument('--bridge-port',type=int,default=0,help='Optional localhost Gtuner receiver port; 0 disables')
     p.add_argument('--headless',action='store_true',help='Log results without a preview window')
     p.add_argument('--record',action='store_true',help='Save an annotated MP4')
     p.add_argument('--record-raw',action='store_true',help='Save unannotated observed frames and an automatic review queue for learning')
     p.add_argument('--dshow',action='store_true',help='Use DirectShow for a Windows camera index')
     args = p.parse_args()
+    args.ui_status = args.ui_status or args.ui_preview
+    if not 0 <= args.bridge_port <= 65535:
+        p.error('Invalid bridge port')
     if not args.probe_only and (args.model is None or not args.model.is_file()):
         p.error(f'Model not found: {args.model}')
     if not 0 < args.conf < 1 or args.imgsz <= 0 or args.max_missed < 0 or args.max_frames < 0 or args.seconds < 0:

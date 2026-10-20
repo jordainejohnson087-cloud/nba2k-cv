@@ -1,5 +1,8 @@
 """Windows-only application startup check without a capture card or trained weight."""
 import sys
+import tempfile
+import time
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -23,9 +26,34 @@ def main():
             app.update_idletasks()
             app.update()
             names = [app.tabs.tab(i, 'text') for i in range(app.tabs.index('end'))]
-            required = {'Live Detection', 'Results', 'Updates', 'Improve Model'}
+            required = {'Live Detection', 'Titan Two', 'Results', 'Updates', 'Improve Model'}
             if not required.issubset(names):
                 raise AssertionError(f'Missing app tabs: {required - set(names)}')
+            # Check selected runtime, untimed launch and safe Stop without hardware.
+            with tempfile.TemporaryDirectory() as folder:
+                out=Path(folder);model=out/'best.pt';model.write_bytes(b'test-only')
+                app.model.set(str(model));app.environment.set(sys.executable)
+                app.seconds.set('0');app.compute.set('0');app.bridge_enabled.set(True)
+                with patch.object(app,'_save'),patch.object(app,'_out',return_value=out),patch.object(app,'_start') as start:
+                    app._live()
+                    command=start.call_args.args[0]
+                    assert command[0]==sys.executable
+                    assert command[command.index('--seconds')+1]=='0.0'
+                    assert command[command.index('--device')+1]=='0'
+                    assert '--ui-preview' in command and '--bridge-port' in command
+                    assert json.loads((out/'app_profile.json').read_text())['controller']=='Xbox / GameSir'
+                import numpy as np
+                from live_link import snapshot
+                snapshot(out,dict(timestamp=time.time(),fps=59,inference_ms=10,status='detected',bridge=None),
+                         cv2,np.zeros((100,200,3),dtype=np.uint8))
+                app._preview_tick()
+                assert app.preview_image is not None
+                assert '59.0 processed FPS' in app.live_metrics.get()
+                fake=type('Process',(),{'poll':lambda self:None})()
+                app.process=fake
+                app._stop()
+                assert (out/'stop.request').is_file()
+                app.process=None
         finally:
             app.destroy()
 
