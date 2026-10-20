@@ -41,7 +41,7 @@ class ReconnectIntentTests(unittest.TestCase):
         from app import Desktop
         from types import SimpleNamespace
         app=SimpleNamespace(pending_reconnect=True,resume_after_reconnect=True,
-                            capture_launch_requested=True,process=None)
+                            capture_launch_requested=True,process=None,gtuner_discovery_generation=0)
         Desktop._stop(app)
         self.assertFalse(app.pending_reconnect)
         self.assertFalse(app.resume_after_reconnect)
@@ -57,3 +57,33 @@ class ReconnectIntentTests(unittest.TestCase):
         app._stop.assert_called_once_with(reconnect=True)
         app._prepare_bridge.assert_not_called()
         self.assertTrue(app.resume_after_reconnect)
+
+
+class GtunerDiscoveryTests(unittest.TestCase):
+    def test_keeps_valid_user_choice_before_running_or_portable_copy(self):
+        import tempfile
+        from pathlib import Path
+        from titan_control import discover_gtuner
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);chosen=root/'custom'/'Gtuner.exe';running=root/'running'/'Gtuner.exe'
+            for path in (chosen,running):path.parent.mkdir();path.write_bytes(b'test')
+            self.assertEqual(discover_gtuner(str(chosen),roots=[],process_paths=[str(running)],registry_paths=[]),chosen.resolve())
+            self.assertEqual(discover_gtuner('missing',roots=[],process_paths=[str(running)],registry_paths=[]),running.resolve())
+
+    def test_finds_nested_portable_download_and_registry_install(self):
+        import tempfile
+        from pathlib import Path
+        from titan_control import discover_gtuner
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);path=root/'GtunerIV-1.11'/'GtunerIV'/'Gtuner.exe'
+            path.parent.mkdir(parents=True);path.write_bytes(b'test')
+            self.assertEqual(discover_gtuner(roots=[root],process_paths=[],registry_paths=[]),path.resolve())
+            self.assertEqual(discover_gtuner(roots=[],process_paths=[],registry_paths=[str(path)]),path.resolve())
+
+    def test_missing_install_does_not_return_a_fake_default(self):
+        import tempfile
+        from pathlib import Path
+        from titan_control import discover_gtuner
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);(root/'NotGtuner.exe').write_bytes(b'test')
+            self.assertIsNone(discover_gtuner(roots=[root],process_paths=[],registry_paths=[]))

@@ -22,7 +22,7 @@ def main():
     import psutil
     from app import Desktop
 
-    with patch.object(Desktop, '_check_online'):
+    with patch.object(Desktop, '_check_online'),patch.object(Desktop,'_startup_bridge'):
         app = Desktop()
         try:
             app.update_idletasks()

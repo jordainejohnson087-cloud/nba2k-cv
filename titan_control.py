@@ -9,6 +9,75 @@ import sys
 from pathlib import Path
 
 
+def valid_gtuner_path(value):
+    try:
+        path=Path(value).expanduser()
+        return path.name.lower()=='gtuner.exe' and path.is_file()
+    except (OSError,TypeError,ValueError):return False
+
+
+def discover_gtuner(saved='',roots=None,process_paths=None,registry_paths=None):
+    """Prefer user choice, then a running copy, then bounded common locations."""
+    if valid_gtuner_path(saved):return Path(saved).resolve()
+    if process_paths is None:
+        process_paths=[]
+        if sys.platform=='win32':
+            try:
+                import psutil
+                for process in psutil.process_iter(['name','exe']):
+                    try:
+                        if (process.info.get('name') or '').lower()=='gtuner.exe':
+                            process_paths.append(process.info.get('exe') or '')
+                    except (psutil.Error,OSError):pass
+            except ImportError:pass
+    for value in process_paths:
+        if valid_gtuner_path(value):return Path(value).resolve()
+    if registry_paths is None:
+        registry_paths=[]
+        if sys.platform=='win32':
+            import winreg
+            for hive in (winreg.HKEY_CURRENT_USER,winreg.HKEY_LOCAL_MACHINE):
+                for access in (winreg.KEY_READ|winreg.KEY_WOW64_64KEY,winreg.KEY_READ|winreg.KEY_WOW64_32KEY):
+                    try:
+                        with winreg.OpenKey(hive,r'SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\Gtuner.exe',0,access) as key:
+                            value,_=winreg.QueryValueEx(key,'')
+                            registry_paths.append(os.path.expandvars(value.strip().strip('"')))
+                    except OSError:pass
+    for value in registry_paths:
+        if valid_gtuner_path(value):return Path(value).resolve()
+    if roots is None:
+        home=Path.home()
+        roots=[home/'Downloads',home/'Desktop',home/'Documents',Path(__file__).resolve().parent]
+        roots += [Path(value) for key in ('ProgramFiles','ProgramFiles(x86)','LOCALAPPDATA')
+                  if (value:=os.environ.get(key))]
+    candidates=[]
+    for root in map(Path,roots):
+        for relative in ('Gtuner.exe','GtunerIV/Gtuner.exe','Gtuner IV/Gtuner.exe',
+                         'Gtuner/Gtuner.exe','ConsoleTuner/GtunerIV/Gtuner.exe','Programs/GtunerIV/Gtuner.exe'):
+            candidate=root/relative
+            if valid_gtuner_path(candidate):candidates.append(candidate)
+        # Portable ZIPs commonly extract into a versioned Gtuner folder.
+        # Never walk every file in Downloads or Program Files.
+        try:
+            import itertools
+            folders=[p for p in itertools.islice(root.iterdir(),500)
+                     if p.is_dir() and ('gtuner' in p.name.lower() or p.name.lower()=='consoletuner')]
+        except OSError:continue
+        visited=0
+        while folders and visited<200:
+            folder=folders.pop();visited+=1
+            try:
+                if len(folder.relative_to(root).parts)>4:continue
+                for child in itertools.islice(folder.iterdir(),200):
+                    if valid_gtuner_path(child):candidates.append(child)
+                    elif child.is_dir():folders.append(child)
+            except OSError:continue
+    def modified(path):
+        try:return path.stat().st_mtime
+        except OSError:return 0
+    return max(candidates,key=modified).resolve() if candidates else None
+
+
 def slot_number(value):
     if isinstance(value,bool) or str(value) not in tuple(str(i) for i in range(1,10)):
         raise ValueError('Choose a Titan memory slot from 1 to 9')

@@ -13,7 +13,7 @@ from pathlib import Path
 from meter_core import Config, Detection, MeterTracker
 from run_video import estimate_fill
 from live_link import BridgeClient, SnapshotPublisher, atomic_write
-from titan_control import GtunerController, slot_number, choose_meter_slot
+from titan_control import GtunerController, slot_number, choose_meter_slot, discover_gtuner, valid_gtuner_path
 from capture_pipe import LatestCapture, RawMailbox
 from meter_green import GreenGate, green_config, measure_green
 

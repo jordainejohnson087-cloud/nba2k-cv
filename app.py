@@ -14,7 +14,7 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 from app_update import (apply_update, configured_feed, current_version,
                         download_release, fetch_manifest, newest_download)
 from app_model import import_model, managed_model, model_catalog
-from run_live import green_config, RawMailbox, GtunerController, slot_number, choose_meter_slot
+from run_live import green_config, RawMailbox, GtunerController, slot_number, choose_meter_slot, discover_gtuner, valid_gtuner_path
 
 
 PROJECT=Path(__file__).resolve().parent
@@ -73,6 +73,8 @@ class Desktop(tk.Tk):
         self.importing_model=False
         self.preparing_bridge=False
         self.gtuner_launched=False
+        self.finding_gtuner=False
+        self.gtuner_discovery_generation=0
         self.raw_preview=None
         self.raw_preview_sequence=0
         self.raw_preview_photo_size=None
@@ -341,7 +343,8 @@ class Desktop(tk.Tk):
         row=ttk.Frame(launcher);row.pack(fill='x')
         ttk.Label(row,text='Gtuner IV executable').pack(side='left',padx=(0,8))
         ttk.Entry(row,textvariable=self.gtuner_path).pack(side='left',fill='x',expand=True)
-        ttk.Button(row,text='Browse',command=self._browse_gtuner).pack(side='left',padx=8)
+        ttk.Button(row,text='Find Gtuner',command=self._find_gtuner).pack(side='left',padx=8)
+        ttk.Button(row,text='Browse',command=self._browse_gtuner).pack(side='left')
         ttk.Checkbutton(launcher,text='Open Gtuner on app startup when Titan bridge is enabled',
             variable=self.auto_gtuner,command=self._save).pack(anchor='w',pady=5)
         slot_controls=ttk.Frame(launcher);slot_controls.pack(fill='x',pady=6)
@@ -443,10 +446,24 @@ class Desktop(tk.Tk):
     def _browse_gtuner(self):
         chosen=filedialog.askopenfilename(title='Select Gtuner IV executable',filetypes=[('Gtuner IV','Gtuner.exe'),('Executable','*.exe')])
         if chosen:
-            self.gtuner_path.set(chosen);self._save()
+            self.gtuner_path.set(chosen);self.gtuner_launched=False;self._save()
 
     def _startup_bridge(self):
-        if self.bridge_enabled.get() and (self.auto_gtuner.get() or self.auto_slot.get()):self._prepare_bridge()
+        prepare=self.bridge_enabled.get() and (self.auto_gtuner.get() or self.auto_slot.get())
+        self._find_gtuner(prepare=prepare)
+
+    def _find_gtuner(self,prepare=False,prepare_args=None):
+        if self.finding_gtuner:return
+        self.finding_gtuner=True
+        self.bridge_setup_status.set('Finding Gtuner IV automatically...')
+        saved=self.gtuner_path.get()
+        generation=self.gtuner_discovery_generation
+        def work():
+            try:
+                found=discover_gtuner(saved)
+                self.messages.put(('gtuner_found',(str(found) if found else None,prepare,prepare_args,None,generation)))
+            except Exception as exc:self.messages.put(('gtuner_found',(None,prepare,prepare_args,str(exc),generation)))
+        threading.Thread(target=work,daemon=True).start()
 
     def _launch_gtuner(self):
         folder=self._export_bridge()
@@ -479,6 +496,7 @@ class Desktop(tk.Tk):
 
     def _disconnect_bridge(self):
         self.pending_reconnect=False;self.resume_after_reconnect=False;self.capture_launch_requested=False
+        self.gtuner_discovery_generation+=1
         self.bridge_enabled.set(False);self.trigger_armed.set(False)
         if self.live_active:self._apply_green();self._stop()
         self._save()
@@ -503,6 +521,9 @@ class Desktop(tk.Tk):
 
     def _prepare_bridge(self,for_capture=False,force_slot=False,read_only=False):
         if self._busy():return
+        if not valid_gtuner_path(self.gtuner_path.get()):
+            self._find_gtuner(prepare=True,prepare_args=dict(for_capture=for_capture,force_slot=force_slot,read_only=read_only))
+            return
         try:selected=None if self.titan_slot.get()=="Auto (meter bridge)" else slot_number(self.titan_slot.get())
         except ValueError as exc:
             self.bridge_setup_status.set(str(exc));return
@@ -697,6 +718,9 @@ class Desktop(tk.Tk):
         return out
 
     def _busy(self):
+        if self.finding_gtuner:
+            messagebox.showinfo('Finding Gtuner','Wait for automatic Gtuner discovery to finish first.')
+            return True
         if self.preparing_bridge:
             messagebox.showinfo('Bridge check active','Wait for the bridge check to finish first.')
             return True
@@ -833,6 +857,7 @@ class Desktop(tk.Tk):
 
     def _stop(self,reconnect=False):
         if not reconnect:
+            self.gtuner_discovery_generation+=1
             self.pending_reconnect=False;self.resume_after_reconnect=False;self.capture_launch_requested=False
         if self.process and self.process.poll() is None:
             if self.live_active and self.active_out:
@@ -852,6 +877,18 @@ class Desktop(tk.Tk):
                     self.status.set(f'{len(self.catalog)} available weights in the model library')
                 elif kind=='models_error':
                     self.finding_models=False;self.status.set('Model search failed: '+value)
+                elif kind=='gtuner_found':
+                    self.finding_gtuner=False
+                    found,prepare,prepare_args,error,generation=value
+                    if valid_gtuner_path(self.gtuner_path.get()):found=self.gtuner_path.get()
+                    if found:
+                        if self.gtuner_path.get()!=found:self.gtuner_launched=False
+                        self.gtuner_path.set(found);self._save()
+                        self.bridge_setup_status.set('Gtuner IV found: '+found)
+                        if prepare and generation==self.gtuner_discovery_generation and not self.live_active:
+                            self._prepare_bridge(**(prepare_args or {}))
+                    else:
+                        self.bridge_setup_status.set('Gtuner IV not found. Install/extract Gtuner IV, then Find Gtuner or Browse.'+(' '+error if error else ''))
                 elif kind=='bridge_prepared':
                     self.preparing_bridge=False
                     capture,result,error,slots=value
