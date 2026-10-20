@@ -554,12 +554,12 @@ class Desktop(tk.Tk):
                 else:
                     found=discover_gtuner(executable)
                     if found and auto_host:launch_gtuner_background(found,folder)
-                    if fast['receiver']!='receiving' and not force_slot and not read_only:
-                        result=service.verify(timeout=2,expected_slot=target)
-                        if not result['ready']:
-                            error='Gtuner CV worker is not receiving. Start gtuner_meter.py in Gtuner once, then keep Gtuner running minimized. The local API cannot replace its USB host.'
-                    else:
-                        if not found:raise RuntimeError('Gtuner was not found for slot control; select its executable or start the installed meter slot manually.')
+                    # Receiver availability and slot selection are independent.
+                    # A missing CV worker must not skip loading the selected slot.
+                    current=service.verify(timeout=2,expected_slot=target)
+                    if current['ready'] and not force_slot and not read_only:
+                        result=current
+                    elif found:
                         controller=GtunerController(found);controller.connect()
                         try:slots=controller.read_slots()
                         except Exception:slots={}
@@ -568,8 +568,10 @@ class Desktop(tk.Tk):
                             controller.select_slot(target)
                         result=service.verify(timeout=3,expected_slot=target if switch and not read_only else None)
                         if read_only:result=dict(result,read_only=True)
-                        if not result['ready'] and not read_only:
-                            error=result['stage']+'. Check Titan PROG, the running meter GPC slot, and the Gtuner CV worker. Console OUTPUT/authentication is a separate hardware check.'
+                    else:
+                        result=current
+                    if not result['ready'] and not read_only:
+                        error=result['stage']+'. Connect Titan PROG to this PC, run titan_meter.gpc in the selected slot, and start bridge/gtuner_meter.py in Gtuner Computer Vision with Null Video Input. Keep that worker running; opening the files alone does not start it. Console OUTPUT/authentication is separate.'
                 if found and result is not None:result=dict(result,gtuner_path=str(found))
             except Exception as exc:
                 error=str(exc);result=service.status()

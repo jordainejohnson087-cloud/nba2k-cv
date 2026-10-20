@@ -42,6 +42,7 @@ jobs:
         shell: pwsh
         run: .\.venv\Scripts\python.exe -m unittest discover -s testing -v
       - name: Start Windows GUI and inspect tabs
+        timeout-minutes: 3
         shell: pwsh
         run: .\.venv\Scripts\python.exe testing\windows_smoke.py
       - name: Build backwards-compatible update and import bundled runtime

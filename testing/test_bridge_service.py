@@ -71,3 +71,16 @@ class BridgeApiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             path=Path(folder)/'config.json';path.write_text(json.dumps(dict(url='http://example.com',token='x'*32)))
             with self.assertRaises(ValueError):BridgeServiceClient(path)
+
+    def test_old_device_sequence_cannot_verify_a_new_session(self):
+        service=BridgeService()
+        try:
+            service.client.status=lambda:dict(receiver='receiving',hardware='heartbeat verified',
+                active_slot=4,device_sequence=service.first_sequence-1,device_event=0)
+            self.assertFalse(service.status()['ready'])
+            self.assertEqual(service.status()['stage'],'Titan script payload echo missing')
+            service.client.seq=service.first_sequence
+            service.client.status=lambda:dict(receiver='receiving',hardware='heartbeat verified',
+                active_slot=4,device_sequence=service.first_sequence,device_event=0)
+            self.assertTrue(service.status()['ready'])
+        finally:service.close()

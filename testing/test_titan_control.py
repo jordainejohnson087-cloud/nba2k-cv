@@ -98,3 +98,23 @@ class BridgeStartupTests(unittest.TestCase):
         Desktop._startup_bridge(app)
         app._prepare_bridge.assert_called_once_with()
         app._find_gtuner.assert_not_called()
+
+    def test_missing_receiver_still_selects_requested_titan_slot(self):
+        from app import Desktop
+        from types import SimpleNamespace
+        import queue
+        def variable(value):
+            result=Mock();result.get.return_value=value;return result
+        missing=dict(ready=False,receiver='waiting for Gtuner',stage='Gtuner CV worker not receiving')
+        service=Mock();service.verify.return_value=missing
+        app=SimpleNamespace(_busy=Mock(return_value=False),bridge_service=service,
+            titan_slot=variable('4'),trigger_armed=Mock(),_apply_green=Mock(),
+            bridge_setup_status=Mock(),gtuner_path=variable('Gtuner.exe'),auto_gtuner=variable(True),
+            auto_slot=variable(True),_export_bridge=Mock(return_value='bridge'),messages=queue.Queue())
+        with patch('app.discover_gtuner',return_value='Gtuner.exe'),patch('app.launch_gtuner_background'),patch('app.GtunerController') as factory,patch('app.threading.Thread') as thread:
+            thread.return_value.start.side_effect=lambda:thread.call_args.kwargs['target']()
+            Desktop._prepare_bridge(app)
+            factory.return_value.select_slot.assert_called_once_with(4)
+        _,(_,result,error,_)=app.messages.get_nowait()
+        self.assertFalse(result['ready'])
+        self.assertIn('Null Video Input',error)

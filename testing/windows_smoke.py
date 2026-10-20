@@ -3,6 +3,9 @@ import sys
 import tempfile
 import time
 import json
+import subprocess
+import faulthandler
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
@@ -22,7 +25,14 @@ def main():
     import psutil
     from app import Desktop
 
-    with patch.object(Desktop, '_check_online'),patch.object(Desktop,'_startup_bridge'):
+    def unexpected_dialog(*args,**kwargs):
+        raise AssertionError(f'Unexpected modal dialog: {args!r} {kwargs!r}')
+
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(Desktop, '_check_online'))
+        stack.enter_context(patch.object(Desktop, '_startup_bridge'))
+        for name in ('showerror','showinfo','showwarning','askyesno'):
+            stack.enter_context(patch('app.messagebox.'+name,side_effect=unexpected_dialog))
         app = Desktop()
         try:
             app.update_idletasks()
@@ -81,7 +91,8 @@ def main():
                 capture_folder=out/'capture_only';capture_folder.mkdir()
                 app.model.set(str(out/'missing.pt'));app.environment.set('missing-python.exe')
                 capture_process=type('Process',(),{'stdout':[], 'wait':lambda self:0,'poll':lambda self:0})()
-                with patch.object(app,'_out',return_value=capture_folder),patch.object(app_module.subprocess,'Popen',return_value=capture_process) as launch:
+                with patch.object(app,'_out',return_value=capture_folder),patch.object(app_module.subprocess,'Popen',return_value=capture_process) as launch,patch.object(app_module.threading,'Thread') as reader:
+                    reader.return_value.start.side_effect=lambda:reader.call_args.kwargs['target']()
                     app._start_capture()
                     command=launch.call_args.args[0]
                     assert command[0]==sys.executable and '--capture-only' in command
@@ -98,7 +109,7 @@ def main():
                 capture_owner=fake
                 (out/'capture_status.json').write_text(json.dumps(dict(state='capturing',timestamp=time.time(),frames=1,
                     capture_fps=60,reported_capture=dict(width=1920,height=1080,fps=60))))
-                app.model.set(str(model));app.bridge_enabled.set(True)
+                app.model.set(str(model));app.environment.set(sys.executable);app.bridge_enabled.set(True)
                 with patch.object(app,'_prepare_bridge') as prepare,patch.object(app,'_save'),patch.object(app,'_out',return_value=out),patch.object(app,'_start') as start:
                     app._live()
                     prepare.assert_not_called()
@@ -182,5 +193,31 @@ def main():
           f'Ultralytics {ultralytics.__version__}; CUDA available: {torch.cuda.is_available()}')
 
 
+def run_bounded(command,timeout=120):
+    """Supervise outside Tk: a blocked native call cannot defeat this deadline."""
+    process=subprocess.Popen(command)
+    try:
+        return process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        print(f'Windows GUI smoke exceeded {timeout}s; terminating worker.',file=sys.stderr,flush=True)
+        return 124
+    finally:
+        if process.poll() is None:
+            if sys.platform=='win32':
+                try:
+                    subprocess.run(['taskkill','/PID',str(process.pid),'/T','/F'],
+                                   timeout=10,check=False)
+                except (OSError,subprocess.TimeoutExpired):
+                    pass
+            if process.poll() is None:process.kill()
+            process.wait(timeout=10)
+
+
 if __name__ == '__main__':
-    main()
+    if '--worker' in sys.argv:
+        faulthandler.enable()
+        faulthandler.dump_traceback_later(90)
+        try:main()
+        finally:faulthandler.cancel_dump_traceback_later()
+    else:
+        raise SystemExit(run_bounded([sys.executable,'-u',str(Path(__file__).resolve()),'--worker']))

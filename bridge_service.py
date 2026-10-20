@@ -43,6 +43,7 @@ class BridgeService:
     def __init__(self,gtuner_port=26740):
         self.client=BridgeClient(gtuner_port)
         self.client.seq=secrets.randbelow(0x7fffffff)+1
+        self.first_sequence=self.client.seq+1
         self.token=secrets.token_urlsafe(32)
         self.enabled=False;self.output_allowed=False;self.expected_slot=None
         self.latest=None;self.error=None
@@ -89,9 +90,11 @@ class BridgeService:
     def status(self):
         value=self.client.status()
         matching=self.expected_slot is None or value.get('active_slot')==self.expected_slot
-        ready=value['hardware']=='heartbeat verified' and value.get('device_sequence') is not None and matching
+        sequence=value.get('device_sequence')
+        echo=type(sequence) is int and self.first_sequence<=sequence<=self.client.seq
+        ready=value['hardware']=='heartbeat verified' and echo and matching
         if value['receiver']!='receiving':stage='Gtuner CV worker not receiving'
-        elif value['hardware']!='heartbeat verified' or value.get('device_sequence') is None:stage='Titan script payload echo missing'
+        elif value['hardware']!='heartbeat verified' or not echo:stage='Titan script payload echo missing'
         elif not matching:stage='Selected Titan slot does not match'
         else:stage='Titan bridge verified; console output unverified'
         return dict(value,api='running',enabled=self.enabled,ready=ready,stage=stage,last_error=self.error)
