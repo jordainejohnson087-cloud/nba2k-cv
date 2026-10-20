@@ -29,6 +29,21 @@ def main():
             required = {'Models', 'Live Detection', 'Titan Two', 'Results', 'Updates', 'Improve Model'}
             if not required.issubset(names):
                 raise AssertionError(f'Missing app tabs: {required - set(names)}')
+            # Startup notification is nonmodal, persistent in the banner, and shown once per version.
+            release={'version':2026102005}
+            app._handle_release(release);app.update()
+            first_notice=app.update_notice
+            assert first_notice is not None and first_notice.winfo_exists()
+            assert app.update_banner.winfo_ismapped()
+            app._dismiss_update_notice()
+            app._handle_release(release)
+            assert app.update_notice is None
+            app.updating=True
+            app._update_failed('simulated network failure')
+            assert not app.updating and str(app.install_button.cget('state'))=='normal'
+            app._handle_release(None);app.update()
+            assert not app.update_banner.winfo_ismapped()
+            assert str(app.install_button.cget('state'))=='disabled'
             from PIL import ImageGrab
             app.lift();app.update()
             screenshot=Path('test_results')/'ui_preview.png'

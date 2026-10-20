@@ -111,9 +111,14 @@ class Desktop(tk.Tk):
         self.status=tk.StringVar(value='Ready')
         self.update_status=tk.StringVar(value='Update check pending')
         self.latest_release=None
+        self.checking_updates=False
+        self.updating=False
+        self.notified_versions=set()
+        self.update_notice=None
         self._build()
         self.after(100,self._poll)
         self.after(500,lambda:self._check_online(silent=True))
+        self.after(300000,self._periodic_update_check)
         self.protocol('WM_DELETE_WINDOW',self._close)
 
     def _theme(self):
@@ -194,6 +199,10 @@ class Desktop(tk.Tk):
         ttk.Label(header,text='METER LAB',style='Brand.TLabel').pack(side='left')
         ttk.Label(header,text='  NBA 2K  /  VISION WORKSPACE',style='Muted.TLabel').pack(side='left',padx=12)
         ttk.Label(header,text=f'v{current_version(PROJECT)}',style='Muted.TLabel').pack(side='right')
+        self.update_banner=ttk.Frame(self,padding=(22,10))
+        ttk.Label(self.update_banner,textvariable=self.update_status).pack(side='left',fill='x',expand=True)
+        self.banner_install=ttk.Button(self.update_banner,text='Install Update',command=self._install_online)
+        self.banner_install.pack(side='right')
         self.tabs=ttk.Notebook(self);self.tabs.pack(fill='both',expand=True,padx=18,pady=(0,12))
         live=ttk.Frame(self.tabs,padding=(0,16,0,0));self.tabs.add(live,text='Live Detection')
         live.columnconfigure(0,weight=0,minsize=350);live.columnconfigure(1,weight=1)
@@ -511,6 +520,9 @@ class Desktop(tk.Tk):
         return out
 
     def _busy(self):
+        if self.updating:
+            messagebox.showinfo("Update in progress","Wait for the update to finish first.")
+            return True
         if self.importing_model:
             messagebox.showinfo('Model import active','Wait for the model copy to finish first.')
             return True
@@ -630,13 +642,13 @@ class Desktop(tk.Tk):
                 elif kind=='models_error':
                     self.finding_models=False;self.status.set('Model search failed: '+value)
                 elif kind=='release':
-                    self.latest_release=value
-                    if value:
-                        self.update_status.set(f"Version {value['version']} is available. Click Install Update.")
-                        self.install_button.configure(state='normal')
-                    else:self.update_status.set('You have the latest version.')
+                    self.checking_updates=False
+                    self._handle_release(value)
                 elif kind=='update_error':
-                    self.update_status.set(f'Update check failed: {value}')
+                    self.checking_updates=False
+                    self.update_status.set(f'Update check failed; will retry: {value}')
+                elif kind=='install_error':
+                    self._update_failed(value)
                 elif kind=='model_imported':
                     self.importing_model=False
                     self.model.set(str(value));self._refresh_choices();self._save()
@@ -729,11 +741,51 @@ class Desktop(tk.Tk):
         folder=self._selected()
         if folder:self._open_path(folder)
 
+    def _periodic_update_check(self):
+        self._check_online(silent=True)
+        self.after(300000,self._periodic_update_check)
+
+    def _dismiss_update_notice(self):
+        if self.update_notice is not None:
+            self.update_notice.destroy()
+            self.update_notice=None
+
+    def _handle_release(self,info):
+        self.latest_release=info
+        if not info:
+            self.update_status.set('You have the latest version.')
+            self.install_button.configure(state='disabled')
+            self.update_banner.pack_forget()
+            self._dismiss_update_notice()
+            return
+        self.update_status.set(f"Update {info['version']} available. Stop any run before installing.")
+        self.install_button.configure(state='normal')
+        self.banner_install.configure(state='normal')
+        self.update_banner.pack(fill='x',before=self.tabs,padx=18,pady=(0,10))
+        if info['version'] in self.notified_versions:return
+        self.notified_versions.add(info['version'])
+        self._dismiss_update_notice()
+        notice=tk.Toplevel(self)
+        self.update_notice=notice
+        notice.title('NBA2K CV — Update available')
+        notice.transient(self)
+        notice.resizable(False,False)
+        body=ttk.Frame(notice,padding=24);body.pack(fill='both',expand=True)
+        ttk.Label(body,text='An update is available',font=('Segoe UI',16,'bold')).pack(anchor='w')
+        ttk.Label(body,text=f"Installed: {current_version(PROJECT)}   Available: {info['version']}").pack(anchor='w',pady=(12,6))
+        ttk.Label(body,text='Install downloads the update, verifies it, and restarts the app.\nYour models, settings, and results stay in place.').pack(anchor='w')
+        buttons=ttk.Frame(body);buttons.pack(fill='x',pady=(18,0))
+        ttk.Button(buttons,text='Later',command=self._dismiss_update_notice).pack(side='right')
+        ttk.Button(buttons,text='Install Update',command=self._install_online).pack(side='right',padx=8)
+        notice.protocol('WM_DELETE_WINDOW',self._dismiss_update_notice)
+
     def _check_online(self,silent=False):
+        if self.checking_updates or self.updating:return
         feed=configured_feed(PROJECT)
         if not feed:
-            self.update_status.set('Online update feed has not been published yet; downloaded ZIP updates remain available.')
+            self.update_status.set('Online update feed has not been configured.')
             return
+        self.checking_updates=True
         self.update_status.set('Checking for updates...')
         def work():
             try:self.messages.put(('release',fetch_manifest(feed,PROJECT)))
@@ -741,24 +793,36 @@ class Desktop(tk.Tk):
         threading.Thread(target=work,daemon=True).start()
 
     def _install_online(self):
-        if self._busy() or not self.latest_release:return
+        if self._busy() or self.checking_updates or not self.latest_release:return
+        release=dict(self.latest_release)
+        self.updating=True
+        self._dismiss_update_notice()
         self.install_button.configure(state='disabled')
+        self.banner_install.configure(state='disabled')
         self.update_status.set('Downloading and verifying update...')
         def work():
-            try:self.messages.put(('downloaded',download_release(self.latest_release,PROJECT)))
-            except Exception as exc:self.messages.put(('update_error',str(exc)))
+            try:self.messages.put(('downloaded',download_release(release,PROJECT)))
+            except Exception as exc:self.messages.put(('install_error',str(exc)))
         threading.Thread(target=work,daemon=True).start()
+
+    def _update_failed(self,error):
+        self.updating=False
+        self.update_status.set(f'Update failed; you can retry: {error}')
+        if self.latest_release:
+            self.install_button.configure(state='normal')
+            self.banner_install.configure(state='normal')
 
     def _finish_update(self,archive):
         try:result=apply_update(archive,PROJECT)
         except Exception as exc:
-            self.update_status.set(f'Update failed: {exc}')
+            self._update_failed(str(exc))
             messagebox.showerror('Update failed',str(exc));return
         messagebox.showinfo('Updated',f"Updated to version {result['version']}. The app will restart.")
         subprocess.Popen([sys.executable,str(PROJECT/'app.py')],cwd=PROJECT)
         self.destroy()
 
     def _update_local(self):
+        if self._busy():return
         if self.importing_model:
             messagebox.showinfo('Model import active','Wait for the model copy to finish first.');return
         if self.process and self.process.poll() is None:
@@ -774,6 +838,8 @@ class Desktop(tk.Tk):
         self._finish_update(archive)
 
     def _close(self):
+        if self.updating:
+            messagebox.showinfo('Update in progress','Wait for the update to finish before closing.');return
         if self.importing_model:
             messagebox.showinfo('Model import active','Wait for the model copy to finish first.');return
         if self.process and self.process.poll() is None:
