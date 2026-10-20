@@ -463,8 +463,8 @@ class Desktop(tk.Tk):
             self.gtuner_path.set(chosen);self.gtuner_launched=False;self._save()
 
     def _startup_bridge(self):
-        prepare=self.bridge_enabled.get() and (self.auto_gtuner.get() or self.auto_slot.get())
-        self._find_gtuner(prepare=prepare)
+        if self.bridge_enabled.get():self._prepare_bridge()
+        else:self._find_gtuner()
 
     def _find_gtuner(self,prepare=False,prepare_args=None):
         if self.finding_gtuner:return

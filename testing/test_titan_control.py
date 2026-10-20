@@ -87,3 +87,14 @@ class GtunerDiscoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder);(root/'NotGtuner.exe').write_bytes(b'test')
             self.assertIsNone(discover_gtuner(roots=[root],process_paths=[],registry_paths=[]))
+
+
+class BridgeStartupTests(unittest.TestCase):
+    def test_existing_background_bridge_is_checked_without_executable_discovery(self):
+        from app import Desktop
+        from types import SimpleNamespace
+        enabled=Mock();enabled.get.return_value=True
+        app=SimpleNamespace(bridge_enabled=enabled,_prepare_bridge=Mock(),_find_gtuner=Mock())
+        Desktop._startup_bridge(app)
+        app._prepare_bridge.assert_called_once_with()
+        app._find_gtuner.assert_not_called()
