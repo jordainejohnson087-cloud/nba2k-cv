@@ -6,6 +6,7 @@ import struct
 import sys
 import tempfile
 import time
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,7 +14,7 @@ from unittest.mock import patch
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
-from live_link import BridgeClient, snapshot
+from live_link import BridgeClient, SnapshotPublisher, snapshot
 import run_live
 spec=importlib.util.spec_from_file_location('gtuner_meter',ROOT/'bridge'/'gtuner_meter.py')
 gcv=importlib.util.module_from_spec(spec)
@@ -91,6 +92,35 @@ class LinkTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             snapshot(folder,dict(frame=1));snapshot(folder,dict(frame=2))
             self.assertEqual(json.loads((Path(folder)/'live_status.json').read_text()),dict(frame=2))
+
+    def test_slow_preview_keeps_only_latest_pending_frame(self):
+        started=threading.Event();release=threading.Event();written=[]
+        def slow(out,payload,cv2,frame):
+            if payload['frame']==0:
+                started.set();release.wait(2)
+            written.append(payload['frame'])
+        with patch('live_link.snapshot',side_effect=slow):
+            publisher=SnapshotPublisher('.',None)
+            try:
+                publisher.submit(dict(frame=0))
+                self.assertTrue(started.wait(1))
+                for i in range(1,50):publisher.submit(dict(frame=i))
+                self.assertEqual(publisher.pending.qsize(),1)
+            finally:
+                release.set();publisher.close()
+            self.assertEqual(written,[0,49])
+
+    def test_explicit_cuda_does_not_fall_back(self):
+        from test_live import FakeCapture,FakeYOLO,LiveTests
+        cap=FakeCapture(5)
+        cv=SimpleNamespace(VideoCapture=lambda _:cap,CAP_PROP_BUFFERSIZE=1,CAP_PROP_FPS=2,
+                           CAP_PROP_FRAME_WIDTH=3,CAP_PROP_FRAME_HEIGHT=4)
+        torch=SimpleNamespace(cuda=SimpleNamespace(is_available=lambda:False))
+        with tempfile.TemporaryDirectory() as folder:
+            args=LiveTests().args(Path(folder),'0');args.device='0'
+            with self.assertRaisesRegex(RuntimeError,'cannot access CUDA'):
+                run_live.run(args,cv,torch,FakeYOLO)
+            self.assertTrue(cap.released)
 
     def test_graceful_stop_preserves_report(self):
         from test_live import FakeCapture,FakeYOLO,LiveTests
