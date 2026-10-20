@@ -13,8 +13,9 @@ from pathlib import Path
 from meter_core import Config, Detection, MeterTracker
 from run_video import estimate_fill
 from live_link import BridgeClient, SnapshotPublisher, atomic_write
-from titan_control import GtunerController, slot_number, choose_meter_slot, discover_gtuner, valid_gtuner_path
-from capture_pipe import LatestCapture, RawMailbox
+from titan_control import GtunerController, slot_number, choose_meter_slot, discover_gtuner, valid_gtuner_path, launch_gtuner_background
+from capture_pipe import LatestCapture, RawMailbox, SharedCapture
+from bridge_service import BridgeService, BridgeServiceClient
 from meter_green import GreenGate, green_config, measure_green
 
 
@@ -137,7 +138,8 @@ class WallClockRecorder:
 
 def run(args, cv2, torch, YOLO):
     source = str(args.source)
-    cap = open_capture(cv2, source, args.dshow,getattr(args,"backend","auto"))
+    shared=getattr(args,"capture_session",None)
+    cap = SharedCapture(shared,cv2) if shared else open_capture(cv2, source, args.dshow,getattr(args,"backend","auto"))
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open capture source {source}; check its device index and that another app is not using it")
     mode = configure_capture(cv2,cap,args)
@@ -166,7 +168,9 @@ def run(args, cv2, torch, YOLO):
     late_reads = 0
     missing_reads = 0
     reason = 'stopped'
-    bridge = BridgeClient(args.bridge_port) if getattr(args, 'bridge_port', 0) else None
+    service_config=getattr(args,'bridge_service',None)
+    bridge = (BridgeServiceClient(service_config) if service_config else
+              BridgeClient(args.bridge_port) if getattr(args, 'bridge_port', 0) else None)
     bridge_status = None
     ui_enabled = getattr(args, 'ui_preview', False)
     publisher = SnapshotPublisher(args.out, cv2) if getattr(args,'ui_status',False) else None
@@ -241,8 +245,10 @@ def run(args, cv2, torch, YOLO):
                     ok,frame=cap.read();read_at=time.perf_counter();captured_at=time.time()
                     read_ms=(read_at-read_start)*1000
                     if not ok or frame is None:
+                        if stop_file and stop_file.exists():reason='user_stopped';break
                         missing_reads+=1;reason='source_ended_or_disconnected';break
-                    source_frame+=1
+                    source_frame=cap.sample_source_frame if shared else source_frame+1
+                    if shared:captured_at=cap.captured_at
                 stage_times['read_ms'].append(read_ms)
                 skipped=source_frame-previous_source-1
                 if skipped:
@@ -324,7 +330,7 @@ def run(args, cv2, torch, YOLO):
                             elapsed_sec=read_at-start, fps=count/max(.001,read_at-start),
                             inference_ms=inference_ms, device=str(device),
                             status=state['status'], fill=state['fill'], box=state['box'], source_frame=source_frame,
-                            capture_fps=(pump.frames/max(.001,read_at-start) if pump else count/max(.001,read_at-start)),
+                            capture_fps=(cap.info.get('capture_fps',0) if shared else pump.frames/max(.001,read_at-start) if pump else count/max(.001,read_at-start)),
                             capture_frames=pump.frames if pump else count+1,skipped_inference_frames=skipped_frames,
                             reported_capture=mode,preview_source='direct BGR' if direct else 'analyzed PNG',
                             bridge=bridge_status, green=measurement, trigger=state['trigger']), overlay if ui_enabled and not direct else None)
@@ -379,7 +385,8 @@ def run(args, cv2, torch, YOLO):
         bridge=bridge_status, ui_preview=ui_enabled,
         capture_backend=getattr(args,'backend','auto'),live_direct=direct,
         display_fps_requested=display_fps,render_mode=getattr(args,'render_mode','performance'),
-        capture_frames=pump.frames if pump else count,skipped_inference_frames=skipped_frames,
+        capture_session=str(shared) if shared else None,
+        capture_frames=cap.source_span if shared else pump.frames if pump else count,skipped_inference_frames=skipped_frames,
         capture_reader_stopped=capture_reader_stopped,capture_error=pump.error if pump else None,
         direct_preview_error=display_state['error'],
         capture_read_fps=(pump.frames/elapsed if pump and elapsed else count/elapsed if elapsed else 0),
@@ -416,9 +423,74 @@ def run(args, cv2, torch, YOLO):
     return report
 
 
+def run_capture_only(args,cv2):
+    args.out.mkdir(parents=True,exist_ok=True)
+    cap=open_capture(cv2,str(args.source),args.dshow,getattr(args,'backend','auto'))
+    if not cap.isOpened():
+        cap.release();raise RuntimeError('Cannot open capture card; close other software using that card.')
+    preview=source=None;count=0;reason='stopped';error=None;intervals=[];last=None
+    start=time.perf_counter();last_status=0;next_display=0;settings_checked=0
+    mode={};display_fps=args.display_fps;render_mode=args.render_mode;enabled=True
+    def status(state):
+        elapsed=max(.001,time.perf_counter()-start)
+        return dict(state=state,timestamp=time.time(),frames=count,capture_fps=count/elapsed,
+                    reported_capture=mode,error=error,model_loaded=False)
+    try:
+        mode=configure_capture(cv2,cap,args);cap.set(cv2.CAP_PROP_BUFFERSIZE,1)
+        source=RawMailbox(args.out/'source_frames.bin',write=True,capacity=3840*2160*3)
+        preview=RawMailbox(args.out/'live_bgr.bin',write=True)
+        with (args.out/'capture_frames.csv').open('w',newline='') as file:
+            log=csv.DictWriter(file,fieldnames=['frame','timestamp','read_ms','read_interval_ms']);log.writeheader()
+            while True:
+                if args.stop_file and args.stop_file.exists():reason='user_stopped';break
+                if args.seconds and time.perf_counter()-start>=args.seconds:reason='time_limit';break
+                if args.max_frames and count>=args.max_frames:reason='frame_limit';break
+                before=time.perf_counter();ok,frame=cap.read();now=time.perf_counter();stamp=time.time()
+                if not ok or frame is None:reason='source_ended_or_disconnected';break
+                if frame.ndim!=3 or frame.shape[2]!=3 or frame.shape[1]>3840 or frame.shape[0]>2160:
+                    raise RuntimeError('Capture requires decoded BGR at up to 3840x2160')
+                source.publish(frame,cv2,count,stamp,frame.shape[1],frame.shape[0])
+                if args.display_settings and now-settings_checked>=.5:
+                    settings_checked=now
+                    try:
+                        value=json.loads(args.display_settings.read_text())
+                        if value.get('fps') in (15,30,60,120,240):display_fps=value['fps']
+                        if value.get('mode') in ('performance','resolution'):render_mode=value['mode']
+                        enabled=value.get('enabled',True) is True
+                    except (OSError,ValueError):pass
+                if enabled and now+.0005>=next_display:
+                    width,height=(1280,720) if render_mode=='performance' else (1920,1080)
+                    preview.publish(frame,cv2,count,stamp,width,height)
+                    next_display=max(next_display+1/display_fps,now+1/display_fps-.001)
+                interval=(now-last)*1000 if last is not None else None
+                if interval is not None:
+                    intervals.append(interval)
+                    if len(intervals)>10000:del intervals[:5000]
+                log.writerow(dict(frame=count,timestamp=stamp,read_ms=(now-before)*1000,read_interval_ms=interval))
+                count+=1;last=now
+                if now-last_status>=.1:
+                    atomic_write(args.out/'capture_status.json',json.dumps(status('capturing')).encode());last_status=now
+    except Exception as exc:error=str(exc);reason='capture_error'
+    finally:
+        cap.release()
+        if source:source.close()
+        if preview:preview.close()
+        report=dict(status('stopped'),stop_reason=reason,
+                    interval_p95_ms=sorted(intervals)[int(.95*(len(intervals)-1))] if intervals else None)
+        atomic_write(args.out/'capture_status.json',json.dumps(report).encode())
+        atomic_write(args.out/'capture_run.json',json.dumps(report,indent=2).encode())
+    if error:raise RuntimeError(error)
+    if reason=='source_ended_or_disconnected' and str(args.source).isdecimal():
+        raise RuntimeError('Capture card disconnected; inspect capture_run.json')
+    return report
+
+
 def main():
     p = argparse.ArgumentParser(description='Preview and measure live NBA 2K meter detection')
     p.add_argument('--model',type=Path,help='Trained model; not needed for --probe-only')
+    p.add_argument('--capture-only',action='store_true',help='View the card without loading AI or a controller bridge')
+    p.add_argument('--capture-session',type=Path,help='Read an existing capture owner session; never reopen the card')
+    p.add_argument('--bridge-service',type=Path,help='Private local bridge API configuration')
     p.add_argument('--probe-only',action='store_true',help='Measure capture speed without loading AI')
     p.add_argument('--source',default='0',help='Capture card/camera index (0, 1, ...), stream URL, or test video')
     p.add_argument('--out',type=Path,default=Path('test_results/live'))
@@ -455,11 +527,13 @@ def main():
     args.ui_status = args.ui_status or args.ui_preview
     if not 0 <= args.bridge_port <= 65535:
         p.error('Invalid bridge port')
+    if args.capture_session and (args.capture_only or args.live_direct or args.probe_only):
+        p.error('--capture-session cannot open or probe another card reader')
     if args.dshow and args.backend not in ('auto','dshow'):
         p.error('--dshow conflicts with the selected backend')
     if args.live_direct and Path(args.source).is_file():
         p.error('Direct mode is for a live device or stream; use run_video.py for exhaustive video validation.')
-    if not args.probe_only and (args.model is None or not args.model.is_file()):
+    if not args.probe_only and not args.capture_only and (args.model is None or not args.model.is_file()):
         p.error(f'Model not found: {args.model}')
     if not 0 < args.conf < 1 or args.imgsz <= 0 or args.max_missed < 0 or args.max_frames < 0 or args.seconds < 0:
         p.error('Invalid detection or duration settings')
@@ -473,6 +547,9 @@ def main():
         import cv2
     except ImportError as e:
         p.error(f'Install requirements.txt first: {e}')
+    if args.capture_only:
+        run_capture_only(args,cv2)
+        return
     if args.probe_only:
         probe_capture(args,cv2)
         return

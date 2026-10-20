@@ -77,12 +77,34 @@ def main():
                     app._launch_gtuner()
                     assert launch.call_args.args[0]==[str(gtuner),str(out/'titan_meter.gpc'),str(out/'gtuner_meter.py')]
                     assert app.gtuner_launched
-                # Bridged capture must prepare first, without starting the detector.
+                # Start Capture needs neither a model nor the selected CUDA environment.
+                capture_folder=out/'capture_only';capture_folder.mkdir()
+                app.model.set(str(out/'missing.pt'));app.environment.set('missing-python.exe')
+                capture_process=type('Process',(),{'stdout':[], 'wait':lambda self:0,'poll':lambda self:0})()
+                with patch.object(app,'_out',return_value=capture_folder),patch.object(app_module.subprocess,'Popen',return_value=capture_process) as launch:
+                    app._start_capture()
+                    command=launch.call_args.args[0]
+                    assert command[0]==sys.executable and '--capture-only' in command
+                    assert '--model' not in command and '--device' not in command and '--bridge-service' not in command
+                app.capture_active=False;app.capture_process=None
+                # Remove the simulated capture's completion before the next independent run.
+                import queue
+                while True:
+                    try:app.messages.get_nowait()
+                    except queue.Empty:break
+                # A capture owner is independent of AI and of bridge verification.
+                fake=type('Process',(),{'poll':lambda self:None})()
+                app.capture_active=True;app.capture_out=out;app.capture_process=fake
+                capture_owner=fake
+                (out/'capture_status.json').write_text(json.dumps(dict(state='capturing',timestamp=time.time(),frames=1,
+                    capture_fps=60,reported_capture=dict(width=1920,height=1080,fps=60))))
                 app.model.set(str(model));app.bridge_enabled.set(True)
-                with patch.object(app,'_prepare_bridge') as prepare,patch.object(app,'_start') as start:
+                with patch.object(app,'_prepare_bridge') as prepare,patch.object(app,'_save'),patch.object(app,'_out',return_value=out),patch.object(app,'_start') as start:
                     app._live()
-                    prepare.assert_called_once_with(for_capture=True)
-                    start.assert_not_called()
+                    prepare.assert_not_called()
+                    assert '--capture-session' in start.call_args.args[0]
+                    assert '--bridge-service' in start.call_args.args[0]
+                    assert '--live-direct' not in start.call_args.args[0]
                 app.model.set(str(model));app.environment.set(sys.executable)
                 app.seconds.set('0');app.compute.set('0');app.bridge_enabled.set(True)
                 with patch.object(app,'_save'),patch.object(app,'_out',return_value=out),patch.object(app,'_start') as start:
@@ -97,7 +119,7 @@ def main():
                     assert trial[trial.index('--imgsz')+1]=='640'
                     assert trial[trial.index('--model')+1]==str(model)
                     app.imgsz.set('1280')
-                    assert '--ui-preview' in command and '--bridge-port' in command
+                    assert '--capture-session' in command and '--bridge-service' in command
                     assert '--green-settings' in command
                     assert json.loads((out/'green_settings.json').read_text())['armed'] is False
                     app.green_vars['delay_ms'].set('35')
@@ -109,13 +131,14 @@ def main():
                 snapshot(out,dict(timestamp=time.time(),fps=59,inference_ms=10,status='detected',bridge=None),
                          cv2,np.zeros((100,200,3),dtype=np.uint8))
                 app._preview_tick()
-                assert app.preview_image is not None
+                assert app.capture_active
                 assert 'AI 59.0 FPS' in app.live_metrics.get()
                 fake=type('Process',(),{'poll':lambda self:None})()
                 app.process=fake
                 app._stop()
                 assert (out/'stop.request').is_file()
                 app.process=None
+                assert app.capture_active and app.capture_process is capture_owner
                 from capture_pipe import RawMailbox
                 with_raw=RawMailbox(out/'live_bgr.bin',write=True)
                 try:
@@ -147,7 +170,8 @@ def main():
                     app.capture_launch_requested=True
                     app.messages.put(('bridge_prepared',(True,result,None,{4:'NBA2K CV Meter Bridge'})))
                     app._poll()
-                    launch.assert_called_once_with(bridge_ready=True)
+                    launch.assert_not_called()
+                app.capture_active=False;app.capture_process=None
 
 
         finally:

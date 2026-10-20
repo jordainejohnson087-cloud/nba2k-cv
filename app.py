@@ -14,7 +14,7 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 from app_update import (apply_update, configured_feed, current_version,
                         download_release, fetch_manifest, newest_download)
 from app_model import import_model, managed_model, model_catalog
-from run_live import green_config, RawMailbox, GtunerController, slot_number, choose_meter_slot, discover_gtuner, valid_gtuner_path
+from run_live import green_config, RawMailbox, GtunerController, slot_number, choose_meter_slot, discover_gtuner, valid_gtuner_path, launch_gtuner_background, BridgeService
 
 
 PROJECT=Path(__file__).resolve().parent
@@ -66,6 +66,11 @@ class Desktop(tk.Tk):
         self.minsize(1000,600)
         self._theme()
         self.process=None
+        self.capture_process=None
+        self.capture_active=False
+        self.capture_out=None
+        self.bridge_service=None
+        self.bridge_tick_at=0
         self.active_out=None
         self.live_active=False
         self.preview_image=None
@@ -141,6 +146,10 @@ class Desktop(tk.Tk):
         self.notified_versions=set()
         self.update_notice=None
         self._build()
+        try:
+            self.bridge_service=BridgeService()
+            self.bridge_service.configure(enabled=self.bridge_enabled.get())
+        except OSError as exc:self.bridge_setup_status.set('Local bridge service unavailable: '+str(exc))
         self.after(100,self._poll)
         self.after(10,self._display_tick)
         self.after(500,lambda:self._check_online(silent=True))
@@ -287,10 +296,15 @@ class Desktop(tk.Tk):
         work=ttk.Frame(live);work.grid(row=0,column=1,sticky='nsew')
         work.columnconfigure(0,weight=1);work.rowconfigure(2,weight=1)
         actions=ttk.Frame(work);actions.grid(row=0,column=0,sticky='ew',pady=(0,12))
-        ttk.Button(actions,text='▶  Start Live Test',style='Accent.TButton',command=self._live).pack(side='left')
-        ttk.Button(actions,text='■  Stop',style='Stop.TButton',command=self._stop).pack(side='left',padx=8)
-        ttk.Button(actions,text='Check Setup',command=self._setup).pack(side='right')
-        ttk.Button(actions,text='Test Capture Only',command=self._probe).pack(side='right',padx=8)
+        capture_actions=ttk.Frame(actions);capture_actions.pack(fill='x')
+        ttk.Button(capture_actions,text='▶  Start Capture',style='Accent.TButton',command=self._start_capture).pack(side='left')
+        ttk.Button(capture_actions,text='■  Stop Capture',style='Stop.TButton',command=self._stop_capture).pack(side='left',padx=8)
+        ttk.Label(capture_actions,text='Console view • no model required',style='Muted.TLabel').pack(side='left')
+        ai_actions=ttk.Frame(actions);ai_actions.pack(fill='x',pady=(8,0))
+        ttk.Button(ai_actions,text='▶  Start AI Detection',command=self._live).pack(side='left')
+        ttk.Button(ai_actions,text='■  Stop AI',command=self._stop).pack(side='left',padx=8)
+        ttk.Button(ai_actions,text='Check Setup',command=self._setup).pack(side='right')
+        ttk.Button(ai_actions,text='Probe Card',command=self._probe).pack(side='right',padx=8)
         metrics=ttk.Frame(work);metrics.grid(row=1,column=0,sticky='ew',pady=(0,12))
         for col,(title,var) in enumerate([('PROCESSED FPS',self.capture_fps_label),('INFERENCE',self.inference_label),('METER STATUS',self.observation_label)]):
             metrics.columnconfigure(col,weight=1)
@@ -301,7 +315,7 @@ class Desktop(tk.Tk):
         video=ttk.Frame(work,style='Card.TFrame',padding=14);video.grid(row=2,column=0,sticky='nsew')
         video.columnconfigure(0,weight=1);video.rowconfigure(1,weight=1)
         ttk.Label(video,text='LIVE CAPTURE',style='Section.TLabel').grid(row=0,column=0,sticky='w',pady=(0,10))
-        self.screen=ttk.Label(video,text='Ready for your capture\n\nChoose a weight, then start live detection.',style='Video.TLabel',anchor='center')
+        self.screen=ttk.Label(video,text='Start Capture to view your console.\n\nStart AI Detection separately when you are ready.',style='Video.TLabel',anchor='center')
         self.screen.grid(row=1,column=0,sticky='nsew')
         ttk.Label(video,textvariable=self.display_metrics,style='CardMuted.TLabel').grid(row=3,column=0,sticky='w',pady=(0,4))
         ttk.Label(video,textvariable=self.live_metrics,style='CardMuted.TLabel',wraplength=650).grid(row=2,column=0,sticky='w',pady=(10,0))
@@ -486,23 +500,19 @@ class Desktop(tk.Tk):
         self.gtuner_launched=True
 
     def _connect_bridge(self):
-        self.bridge_enabled.set(True)
-        self.pending_reconnect=True
-        self.reconnect_attempts=0
-        if self.live_active:
-            self.trigger_armed.set(False);self._apply_green()
-            self.resume_after_reconnect=True;self._stop(reconnect=True)
-        else:self._prepare_bridge()
+        self.bridge_enabled.set(True);self.trigger_armed.set(False)
+        self._apply_green()
+        if self.bridge_service:self.bridge_service.configure(enabled=True)
+        self.pending_reconnect=True;self.reconnect_attempts=0
+        self._prepare_bridge()
 
     def _disconnect_bridge(self):
         self.pending_reconnect=False;self.resume_after_reconnect=False;self.capture_launch_requested=False
         self.gtuner_discovery_generation+=1
-        self.bridge_enabled.set(False);self.trigger_armed.set(False)
-        if self.live_active:self._apply_green();self._stop()
-        self._save()
-        self.bridge_setup_status.set('App bridge disconnected; Gtuner and USB remain connected.')
-        self.bridge_seen_ready=False
-        self._show_slots({},None)
+        self.bridge_enabled.set(False);self.trigger_armed.set(False);self._apply_green()
+        if self.bridge_service:self.bridge_service.configure(enabled=False)
+        self.bridge_setup_status.set('App bridge disconnected. Capture and AI can continue.')
+        self.bridge_seen_ready=False;self._show_slots(None,None)
 
     def _show_slots(self,slots,active):
         for i in range(1,10):
@@ -512,7 +522,7 @@ class Desktop(tk.Tk):
             self.slot_table.item(str(i),values=(label,'Active — heartbeat verified' if active==i else 'Not verified'))
 
     def _retry_bridge(self):
-        if self.pending_reconnect and not self.preparing_bridge and not self.live_active:
+        if self.pending_reconnect and not self.preparing_bridge:
             if self.reconnect_attempts<3:
                 self.reconnect_attempts+=1;self._prepare_bridge()
             else:
@@ -520,52 +530,54 @@ class Desktop(tk.Tk):
                 self.bridge_setup_status.set('Reconnect attempts exhausted. Check USB PROG and the Gtuner CV worker, then Connect / Reconnect.')
 
     def _prepare_bridge(self,for_capture=False,force_slot=False,read_only=False):
-        if self._busy():return
-        if not valid_gtuner_path(self.gtuner_path.get()):
-            self._find_gtuner(prepare=True,prepare_args=dict(for_capture=for_capture,force_slot=force_slot,read_only=read_only))
-            return
-        try:selected=None if self.titan_slot.get()=="Auto (meter bridge)" else slot_number(self.titan_slot.get())
-        except ValueError as exc:
-            self.bridge_setup_status.set(str(exc));return
-        self._save()
-        try:
-            if not self.gtuner_launched:self._launch_gtuner()
-        except (OSError,ValueError,RuntimeError) as exc:
-            self.bridge_setup_status.set(str(exc))
-            if for_capture:messagebox.showerror('Bridge setup needed',str(exc))
-            return
+        if self._busy(allow_capture=True,allow_detection=True):return
+        if self.bridge_service is None:
+            self.bridge_setup_status.set('Local bridge service is unavailable. Capture and AI remain usable.');return
+        try:selected=None if self.titan_slot.get()=='Auto (meter bridge)' else slot_number(self.titan_slot.get())
+        except ValueError as exc:self.bridge_setup_status.set(str(exc));return
+        self.trigger_armed.set(False);self._apply_green()
         self.preparing_bridge=True
-        self.capture_launch_requested=for_capture
-        self.bridge_setup_status.set('Reading Gtuner slots and checking the Titan payload echo...')
-        executable=self.gtuner_path.get()
-        switch=(self.auto_slot.get() or force_slot) and not read_only
+        self.bridge_setup_status.set('Checking the live bridge before opening any Gtuner window...')
+        executable=self.gtuner_path.get();auto_host=self.auto_gtuner.get()
+        switch=self.auto_slot.get() or force_slot
+        service=self.bridge_service
+        try:folder=self._export_bridge()
+        except (OSError,ValueError) as exc:
+            self.preparing_bridge=False;self.bridge_setup_status.set(str(exc));return
         def work():
-            client=None;controller=None;slots={}
+            controller=None;slots=None;result=None;error=None;found=None
             try:
-                controller=GtunerController(executable)
-                deadline=time.monotonic()+5
-                while True:
-                    try:controller.connect();break
-                    except RuntimeError:
-                        if time.monotonic()>=deadline:raise
-                        time.sleep(.2)
-                try:slots=controller.read_slots()
-                except Exception:slots={}
-                target=selected
-                if switch:
-                    if target is None:target=choose_meter_slot(slots)
-                    controller.select_slot(target)
-                if read_only:
-                    result=dict(ready=False,receiver='not checked',hardware='not checked',read_only=True)
+                target=selected if switch else None
+                fast=service.verify(timeout=1,expected_slot=target)
+                if fast['ready'] and not force_slot and not read_only:
+                    result=fast
                 else:
-                    from run_live import BridgeClient
-                    client=BridgeClient(26740)
-                    result=client.probe(expected_slot=target if switch else None)
-                self.messages.put(('bridge_prepared',(for_capture,result,None,slots)))
-            except Exception as exc:self.messages.put(('bridge_prepared',(for_capture,None,str(exc),slots)))
+                    found=discover_gtuner(executable)
+                    if found and auto_host:launch_gtuner_background(found,folder)
+                    if fast['receiver']!='receiving' and not force_slot and not read_only:
+                        result=service.verify(timeout=2,expected_slot=target)
+                        if not result['ready']:
+                            error='Gtuner CV worker is not receiving. Start gtuner_meter.py in Gtuner once, then keep Gtuner running minimized. The local API cannot replace its USB host.'
+                    else:
+                        if not found:raise RuntimeError('Gtuner was not found for slot control; select its executable or start the installed meter slot manually.')
+                        controller=GtunerController(found);controller.connect()
+                        try:slots=controller.read_slots()
+                        except Exception:slots={}
+                        if switch and not read_only:
+                            if target is None:target=choose_meter_slot(slots)
+                            controller.select_slot(target)
+                        result=service.verify(timeout=3,expected_slot=target if switch and not read_only else None)
+                        if read_only:result=dict(result,read_only=True)
+                        if not result['ready'] and not read_only:
+                            error=result['stage']+'. Check Titan PROG, the running meter GPC slot, and the Gtuner CV worker. Console OUTPUT/authentication is a separate hardware check.'
+                if found and result is not None:result=dict(result,gtuner_path=str(found))
+            except Exception as exc:
+                error=str(exc);result=service.status()
+                if not force_slot and not read_only and result.get('ready'):error=None
+                else:result=dict(result,ready=False)
             finally:
-                if client is not None:client.close()
                 if controller is not None:controller.close()
+            self.messages.put(('bridge_prepared',(False,result,error,slots)))
         threading.Thread(target=work,daemon=True).start()
 
     def _green_values(self):
@@ -582,6 +594,7 @@ class Desktop(tk.Tk):
         if self.live_active and self.active_out:
             from run_live import atomic_write
             atomic_write(self.active_out/'green_settings.json',json.dumps(config).encode())
+        if self.bridge_service:self.bridge_service.allow_output(config["armed"] and self.bridge_enabled.get())
         self._save()
         self.status.set('Green settings applied • '+('trigger enabled' if config['armed'] else 'dry run'))
 
@@ -717,11 +730,14 @@ class Desktop(tk.Tk):
         out.mkdir(parents=True)
         return out
 
-    def _busy(self):
-        if self.finding_gtuner:
+    def _busy(self,allow_capture=False,allow_detection=False,allow_bridge=False):
+        if self.capture_active and not allow_capture:
+            messagebox.showinfo("Capture active","Stop Capture before this operation.")
+            return True
+        if self.finding_gtuner and not allow_bridge:
             messagebox.showinfo('Finding Gtuner','Wait for automatic Gtuner discovery to finish first.')
             return True
-        if self.preparing_bridge:
+        if self.preparing_bridge and not allow_bridge:
             messagebox.showinfo('Bridge check active','Wait for the bridge check to finish first.')
             return True
         if self.updating:
@@ -730,7 +746,7 @@ class Desktop(tk.Tk):
         if self.importing_model:
             messagebox.showinfo('Model import active','Wait for the model copy to finish first.')
             return True
-        if self.process and self.process.poll() is None:
+        if self.process and self.process.poll() is None and not allow_detection:
             messagebox.showinfo('Already running','Stop or finish the current run first.')
             return True
         return False
@@ -747,10 +763,11 @@ class Desktop(tk.Tk):
 
     def _display_changed(self,event=None):
         self._save()
-        if self.live_active and self.active_out:
+        destination=self.capture_out if self.capture_active else self.active_out if self.live_active else None
+        if destination:
             settings=dict(fps=int(self.display_fps.get()),mode=self.render_mode.get().lower(),enabled=self.preview.get())
             from run_live import atomic_write
-            atomic_write(self.active_out/'display_settings.json',json.dumps(settings).encode())
+            atomic_write(destination/'display_settings.json',json.dumps(settings).encode())
 
     def _common(self,values):
         width,height,fps,imgsz,seconds=values
@@ -758,8 +775,52 @@ class Desktop(tk.Tk):
         return ['--source',self.source.get(),'--width',str(width),'--height',str(height),
             '--capture-fps',str(fps),'--fourcc',fourcc,'--backend',backend,'--seconds',str(seconds)]
 
+    def _capture_ready(self):
+        if not self.capture_active or not self.capture_out:return False
+        try:
+            value=json.loads((self.capture_out/'capture_status.json').read_text())
+            return value.get('state')=='capturing' and value.get('frames',0)>0 and 0<=time.time()-value['timestamp']<=2
+        except (OSError,ValueError,KeyError):return False
+
+    def _start_capture(self):
+        if self.capture_active:
+            self.status.set('Capture is already running. Start AI Detection separately.');return
+        if self.updating:
+            messagebox.showinfo('Update active','Wait for the update to finish.');return
+        try:
+            width,height,fps=int(self.width.get()),int(self.height.get()),float(self.fps.get())
+            if min(width,height,fps)<=0 or fps>240:raise ValueError()
+        except ValueError:
+            messagebox.showerror('Capture settings','Choose positive dimensions and a capture FPS up to 240.');return
+        out=self._out('capture_view')
+        settings=dict(fps=int(self.display_fps.get()),mode=self.render_mode.get().lower(),enabled=self.preview.get())
+        (out/'display_settings.json').write_text(json.dumps(settings))
+        # The app environment already has OpenCV; CUDA/model settings are irrelevant here.
+        cmd=[sys.executable,str(PROJECT/'run_live.py'),'--capture-only','--headless',
+            '--out',str(out),'--stop-file',str(out/'capture_stop.request'),
+            '--display-fps',self.display_fps.get(),'--render-mode',self.render_mode.get().lower(),
+            '--display-settings',str(out/'display_settings.json')]+self._common((width,height,fps,1280,0))
+        try:
+            process=subprocess.Popen(cmd,cwd=PROJECT,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1)
+        except OSError as exc:
+            messagebox.showerror('Capture failed',str(exc));return
+        self._close_raw_preview();self.capture_process=process;self.capture_out=out;self.capture_active=True
+        self.display_count=0;self.display_started=time.perf_counter();self.status.set('Opening capture card — AI is stopped')
+        def read_output():
+            for line in process.stdout:self.messages.put(('text','Capture: '+line))
+            self.messages.put(('capture_done',(process.wait(),str(out))))
+        threading.Thread(target=read_output,daemon=True).start()
+
+    def _stop_capture(self):
+        self._stop()
+        if self.capture_active and self.capture_out:
+            (self.capture_out/'capture_stop.request').touch()
+            self.status.set('Stopping capture and saving capture diagnostics...')
+
     def _live(self,bridge_ready=False):
-        if self._busy():return
+        if self._busy(allow_capture=True,allow_bridge=True):return
+        if not self._capture_ready():
+            messagebox.showinfo('Start Capture first','Start Capture and wait for the console image before starting AI detection.');return
         values=self._settings()
         if not values:return
         try:green=self._green_values()
@@ -768,9 +829,6 @@ class Desktop(tk.Tk):
         model=Path(self.model.get())
         if not model.is_file():
             messagebox.showerror('Model missing','Select your trained best.pt file first.');return
-        if self.bridge_enabled.get() and not bridge_ready:
-            self._prepare_bridge(for_capture=True)
-            return
         self._save()
         out=self._out('live')
         executable=self._python()
@@ -780,20 +838,17 @@ class Desktop(tk.Tk):
         (out/'green_settings.json').write_text(json.dumps(green),encoding='utf-8')
         cmd += ['--green-settings',str(out/'green_settings.json')]
         cmd += ['--headless','--ui-status','--device',self.compute.get(),'--stop-file',str(out/'stop.request')]
-        cmd += ['--live-direct','--display-fps',self.display_fps.get(),'--render-mode',self.render_mode.get().lower()]
-        (out/'display_settings.json').write_text(json.dumps(dict(fps=int(self.display_fps.get()),mode=self.render_mode.get().lower(),enabled=self.preview.get())))
-        cmd += ['--display-settings',str(out/'display_settings.json')]
-        if self.preview.get():cmd.append('--ui-preview')
-        if self.bridge_enabled.get():
-            cmd += ['--bridge-port','26740']
+        cmd += ['--capture-session',str(self.capture_out)]
+        if self.bridge_enabled.get() and self.bridge_service:
+            self.bridge_service.configure(enabled=True,expected_slot=getattr(self,'verified_titan_slot',None))
+            config=out/'bridge_service.json';self.bridge_service.write_config(config)
+            cmd += ['--bridge-service',str(config)]
             active=getattr(self,'verified_titan_slot',None)
             if active:cmd += ['--expected-slot',str(active)]
         (out/'app_profile.json').write_text(json.dumps(dict(environment=executable,
             compute=self.compute.get(),controller=self.controller.get(),model=str(model))),encoding='utf-8')
-        self._close_raw_preview()
         self.live_active=True
         self.bridge_seen_ready=False
-        self.display_count=0;self.display_started=time.perf_counter()
         self.active_out=out
         self.last_preview_stamp=None
         self.bridge_status.set('Waiting for Gtuner • Titan Two hardware not verified' if self.bridge_enabled.get() else 'Bridge off')
@@ -856,6 +911,9 @@ class Desktop(tk.Tk):
         threading.Thread(target=read_output,daemon=True).start()
 
     def _stop(self,reconnect=False):
+        if self.bridge_service:
+            self.bridge_service.allow_output(False);self.bridge_service.clear()
+        self.trigger_armed.set(False)
         if not reconnect:
             self.gtuner_discovery_generation+=1
             self.pending_reconnect=False;self.resume_after_reconnect=False;self.capture_launch_requested=False
@@ -897,16 +955,24 @@ class Desktop(tk.Tk):
                     self._show_slots(slots,result.get('active_slot') if ready else None)
                     detail=('Bridge ready — Titan slot '+str(result.get('active_slot') or 'unknown')+' and payload echo verified; console unverified.' if ready else
                         'Slot labels refreshed; device not checked.' if read_only else
-                        'Bridge not ready — '+(error or f"{result['receiver']}; {result['hardware']}. Install the latest meter GPC in the chosen slot and start its CV worker, then retry."))
+                        'Bridge not ready — '+(error or result.get('stage','Device echo missing')))
                     self.bridge_setup_status.set(detail)
+                    if result and result.get('gtuner_path'):self.gtuner_path.set(result['gtuner_path']);self._save()
+                    try:
+                        diagnostic=PROJECT/'test_results'/'bridge_latest.json';diagnostic.parent.mkdir(exist_ok=True)
+                        diagnostic.write_text(json.dumps(dict(timestamp=time.time(),result=result,error=error),indent=2))
+                    except OSError:pass
                     if ready:
                         self.verified_titan_slot=result.get('active_slot')
-                        resume=self.resume_after_reconnect
+                        if self.bridge_service:self.bridge_service.configure(enabled=self.bridge_enabled.get(),expected_slot=self.verified_titan_slot)
                         self.pending_reconnect=False;self.resume_after_reconnect=False;self.reconnect_attempts=0
-                        if self.bridge_enabled.get() and ((capture and self.capture_launch_requested) or resume):
-                            self.capture_launch_requested=False;self._live(bridge_ready=True)
-                    elif capture:messagebox.showerror('Capture not started',detail)
                     elif self.pending_reconnect:self.after(3000,self._retry_bridge)
+                elif kind=='capture_done':
+                    code,out=value
+                    self.capture_active=False;self._close_raw_preview()
+                    if self.live_active:self._stop()
+                    self.status.set(f'Capture stopped (exit {code}) • {out}')
+                    self._log(f'Capture results: {out}\n')
                 elif kind=='release':
                     self.checking_updates=False
                     self._handle_release(value)
@@ -929,15 +995,38 @@ class Desktop(tk.Tk):
                 else:
                     code,out=value
                     self.live_active=False
-                    self._close_raw_preview()
+                    if not self.capture_active:self._close_raw_preview()
                     if self.pending_reconnect:self.after(1000,self._retry_bridge)
                     self.bridge_status.set('Run stopped • bridge inactive')
                     self.status.set(f'Finished (exit {code}) • {out}')
                     self._log(f'\nFinished with exit code {code}. Results: {out}\n')
                     self._refresh()
         except queue.Empty:pass
+        self._capture_tick()
+        self._bridge_tick()
         self._preview_tick()
         self.after(100,self._poll)
+
+    def _capture_tick(self):
+        if not self.capture_active or not self.capture_out:return
+        try:
+            value=json.loads((self.capture_out/'capture_status.json').read_text())
+            if not self.live_active:
+                self.capture_fps_label.set('—');self.inference_label.set('Off');self.observation_label.set('CAPTURE ONLY')
+                self.live_metrics.set(f"Capture {value['capture_fps']:.1f} FPS | AI stopped | card reports {value['reported_capture']['fps']:.1f} FPS")
+        except (OSError,ValueError,KeyError):pass
+
+    def _bridge_tick(self):
+        if self.bridge_service is None or time.monotonic()-self.bridge_tick_at<.5:return
+        self.bridge_tick_at=time.monotonic();value=self.bridge_service.status()
+        self._show_slots(None,value.get('active_slot') if value['ready'] else None)
+        self.bridge_status.set(('Bridge disabled • ' if not self.bridge_enabled.get() else '')+value['stage'])
+        if value['ready']:self.bridge_seen_ready=True
+        elif self.bridge_seen_ready and self.bridge_enabled.get() and not self.pending_reconnect:
+            self.trigger_armed.set(False);self._apply_green()
+            self.pending_reconnect=True;self.reconnect_attempts=0;self.bridge_seen_ready=False
+            self.bridge_setup_status.set('Bridge lost. Trigger disabled; capture and AI continue while reconnecting.')
+            self.after(1000,self._retry_bridge)
 
     def _preview_tick(self):
         if not self.live_active or not self.active_out:return
@@ -950,25 +1039,12 @@ class Desktop(tk.Tk):
             self.observation_label.set(data['status'].upper() if age<=1 else 'STALE')
             self.live_metrics.set(f"Capture {data.get('capture_fps',0):.1f} FPS | AI {data['fps']:.1f} FPS | skipped {data.get('skipped_inference_frames',0)} | inference {data['inference_ms']:.1f} ms | "
                 f"{data['status']} | preview age {age:.1f}s" + (" • STALE" if age>1 else ""))
-            bridge=data.get("bridge")
-            if bridge:
-                self._show_slots(None,bridge.get('active_slot') if age<=.75 else None)
-                verified=age<=.75 and bridge.get('hardware')=='heartbeat verified'
-                if verified:self.bridge_seen_ready=True
-                elif self.bridge_seen_ready and self.bridge_enabled.get() and not self.pending_reconnect:
-                    self.trigger_armed.set(False);self._apply_green()
-                    self.pending_reconnect=True;self.resume_after_reconnect=True;self.reconnect_attempts=0
-                    self.bridge_setup_status.set('Bridge lost — trigger disabled; stopping capture before automatic reconnect.')
-                    self._stop(reconnect=True)
-                self.bridge_status.set("Bridge stale • hardware not verified" if age>.75 else
-                    f"Gtuner: {bridge['receiver']} | Titan Two: {bridge['hardware']} | "
-                    f"local ACK {bridge.get('rtt_ms') or 0:.1f} ms | device event {bridge.get('device_event')} (not console confirmation)")
             if 'green' in data:
                 measurement=data['green'];trigger=data.get('trigger',{})
                 self.green_status.set(f"{'ARMED' if trigger.get('armed') else 'DRY RUN'} | "
                     f"in green: {measurement.get('in_green',False)} | event {trigger.get('event_id',0)} | "
                     f"{measurement.get('reason','')}" + (' • STALE' if age>.25 else ''))
-            if (self.active_out/'live_bgr.bin').exists():return
+            if self.capture_active or (self.active_out/'live_bgr.bin').exists():return
             image=self.active_out/'preview.png'
             stamp=image.stat().st_mtime_ns
             if stamp!=self.last_preview_stamp:
@@ -991,9 +1067,10 @@ class Desktop(tk.Tk):
     def _display_tick(self):
         started=time.perf_counter()
         try:
-            if self.live_active and self.active_out and self.preview.get():
-                if self.raw_preview is None and (self.active_out/'live_bgr.bin').exists():
-                    self.raw_preview=RawMailbox(self.active_out/'live_bgr.bin')
+            display_out=self.capture_out if self.capture_active else self.active_out if self.live_active else None
+            if display_out and self.preview.get():
+                if self.raw_preview is None and (display_out/'live_bgr.bin').exists():
+                    self.raw_preview=RawMailbox(display_out/'live_bgr.bin')
                 sample=self.raw_preview.read(self.raw_preview_sequence) if self.raw_preview else None
                 if sample:
                     from PIL import Image,ImageTk
@@ -1167,13 +1244,24 @@ class Desktop(tk.Tk):
                 self.after(100,self._wait_close)
                 return
             self.process.terminate()
+        if self.capture_active:
+            self._stop_capture();self.after(100,self._wait_close);return
         self._close_raw_preview()
         self.destroy()
 
     def _wait_close(self):
-        if self.process and self.process.poll() is None:
+        if self.capture_active and self.capture_out:(self.capture_out/"capture_stop.request").touch()
+        if (self.process and self.process.poll() is None) or (self.capture_process and self.capture_process.poll() is None):
             self.after(100,self._wait_close)
         else:self.destroy()
+
+    def destroy(self):
+        if getattr(self,'capture_active',False) and self.capture_out:
+            (self.capture_out/'capture_stop.request').touch()
+        if getattr(self,'bridge_service',None):
+            self.bridge_service.close();self.bridge_service=None
+        self._close_raw_preview()
+        super().destroy()
 
 
 def bootstrap_windows_controls():

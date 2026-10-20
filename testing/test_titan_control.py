@@ -41,22 +41,22 @@ class ReconnectIntentTests(unittest.TestCase):
         from app import Desktop
         from types import SimpleNamespace
         app=SimpleNamespace(pending_reconnect=True,resume_after_reconnect=True,
-                            capture_launch_requested=True,process=None,gtuner_discovery_generation=0)
+                            capture_launch_requested=True,process=None,gtuner_discovery_generation=0,bridge_service=None,trigger_armed=Mock())
         Desktop._stop(app)
         self.assertFalse(app.pending_reconnect)
         self.assertFalse(app.resume_after_reconnect)
         self.assertFalse(app.capture_launch_requested)
 
-    def test_reconnect_during_capture_disarms_and_stops_before_retry(self):
+    def test_reconnect_disarms_but_keeps_capture_and_ai_running(self):
         from app import Desktop
         from types import SimpleNamespace
-        app=SimpleNamespace(bridge_enabled=Mock(),trigger_armed=Mock(),live_active=True,
+        app=SimpleNamespace(bridge_enabled=Mock(),trigger_armed=Mock(),live_active=True,bridge_service=None,
                             _apply_green=Mock(),_stop=Mock(),_prepare_bridge=Mock())
         Desktop._connect_bridge(app)
         app.trigger_armed.set.assert_called_once_with(False)
-        app._stop.assert_called_once_with(reconnect=True)
-        app._prepare_bridge.assert_not_called()
-        self.assertTrue(app.resume_after_reconnect)
+        app._stop.assert_not_called()
+        app._prepare_bridge.assert_called_once_with()
+        self.assertTrue(app.pending_reconnect)
 
 
 class GtunerDiscoveryTests(unittest.TestCase):

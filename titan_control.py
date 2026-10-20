@@ -172,3 +172,26 @@ class GtunerController:
         import win32gui
         import win32process
         return win32process.GetWindowThreadProcessId(win32gui.GetForegroundWindow())[1]==window.process_id()
+
+
+def launch_gtuner_background(executable,folder):
+    """Reuse a running host; only a missing host is launched, minimized."""
+    import subprocess
+    if sys.platform!='win32':raise RuntimeError('Gtuner host startup requires Windows')
+    if not valid_gtuner_path(executable):raise ValueError('Gtuner IV executable was not found')
+    import psutil
+    selected=os.path.normcase(str(Path(executable).resolve()))
+    matches=[]
+    for process in psutil.process_iter(['exe']):
+        try:
+            if process.info['exe'] and os.path.normcase(str(Path(process.info['exe']).resolve()))==selected:
+                matches.append(process.pid)
+        except (psutil.Error,OSError):pass
+    if len(matches)>1:raise RuntimeError('More than one matching Gtuner instance is open')
+    if matches:return False
+    startup=subprocess.STARTUPINFO();startup.dwFlags|=subprocess.STARTF_USESHOWWINDOW
+    startup.wShowWindow=7  # SW_SHOWMINNOACTIVE, without stealing foreground focus.
+    folder=Path(folder)
+    subprocess.Popen([str(executable),str(folder/'titan_meter.gpc'),str(folder/'gtuner_meter.py')],
+                     cwd=Path(executable).parent,startupinfo=startup)
+    return True

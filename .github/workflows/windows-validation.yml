@@ -8,6 +8,7 @@ on:
       - 'meter_green.py'
       - 'live_link.py'
       - 'capture_pipe.py'
+      - 'bridge_service.py'
       - 'titan_control.py'
       - 'bridge/**'
       - 'app.py'

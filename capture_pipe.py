@@ -1,4 +1,5 @@
 """Single-owner live capture and a two-buffer raw BGR display mailbox."""
+import json
 import mmap
 import struct
 import threading
@@ -11,14 +12,22 @@ class RawMailbox:
     HEADER=struct.Struct('<QIIIdQ')
     CAPACITY=1920*1080*3
 
-    def __init__(self,path,write=False):
+    def __init__(self,path,write=False,capacity=None):
         self.file=Path(path).open('w+b' if write else 'rb')
         self.writeable=write
-        size=64+2*(64+self.CAPACITY)
+        if write:self.capacity=capacity or self.CAPACITY
+        else:
+            header=self.file.read(24)
+            if len(header)!=24 or header[:8]!=self.MAGIC:
+                self.file.close();raise ValueError('Raw capture buffer is not ready')
+            self.capacity=struct.unpack('<8sQQ',header)[1]
+        if not 0<self.capacity<=3840*2160*3:
+            self.file.close();raise ValueError('Invalid raw buffer capacity')
+        size=64+2*(64+self.capacity)
         if write:self.file.truncate(size)
         self.map=mmap.mmap(self.file.fileno(),0,access=mmap.ACCESS_WRITE if write else mmap.ACCESS_READ)
         self.sequence=0
-        if write:self.map[:24]=struct.pack('<8sQQ',self.MAGIC,self.CAPACITY,0)
+        if write:self.map[:24]=struct.pack('<8sQQ',self.MAGIC,self.capacity,0)
         elif len(self.map)!=size or self.map[:8]!=self.MAGIC:
             self.close();raise ValueError('Unsupported raw preview buffer')
 
@@ -28,9 +37,9 @@ class RawMailbox:
         if scale<1:frame=cv2.resize(frame,(max(1,round(w*scale)),max(1,round(h*scale))))
         h,w=frame.shape[:2]
         data=frame.tobytes()
-        if len(data)>self.CAPACITY or len(data)!=w*h*3:raise ValueError('Preview exceeds raw BGR buffer capacity')
+        if len(data)>self.capacity or len(data)!=w*h*3:raise ValueError('Preview exceeds raw BGR buffer capacity')
         self.sequence+=1;seq=self.sequence
-        offset=64+(seq%2)*(64+self.CAPACITY)
+        offset=64+(seq%2)*(64+self.capacity)
         # Invalidate before touching pixels; publish only after the complete copy.
         self.map[offset:offset+8]=struct.pack('<Q',0)
         self.map[offset+64:offset+64+len(data)]=data
@@ -40,10 +49,10 @@ class RawMailbox:
     def read(self,after=0):
         seq=struct.unpack_from('<Q',self.map,16)[0]
         if seq<=after:return None
-        offset=64+(seq%2)*(64+self.CAPACITY)
+        offset=64+(seq%2)*(64+self.capacity)
         first=self.map[offset:offset+self.HEADER.size]
         actual,w,h,size,stamp,source=self.HEADER.unpack(first)
-        if actual!=seq or not 0<w<=1920 or not 0<h<=1080 or size!=w*h*3 or size>self.CAPACITY:return None
+        if actual!=seq or not 0<w<=3840 or not 0<h<=2160 or size!=w*h*3 or size>self.capacity:return None
         data=self.map[offset+64:offset+64+size]
         if first!=self.map[offset:offset+self.HEADER.size]:return None
         return dict(sequence=seq,width=w,height=h,timestamp=stamp,source_frame=source,bgr=data)
@@ -96,3 +105,48 @@ class LatestCapture:
         with self.condition:self.condition.notify_all()
         self.thread.join(timeout=2)
         return not self.thread.is_alive()
+
+
+class SharedCapture:
+    """Read full-resolution card frames without opening or owning the device."""
+    def __init__(self,session,cv2):
+        self.session=Path(session);self.cv2=cv2;self.mailbox=None;self.sequence=0
+        self.first_source=None;self.sample_source_frame=-1;self.captured_at=0
+        self.source_span=0;self.error=None
+        try:
+            self.info=self._status()
+            if self.info.get('state')!='capturing' or time.time()-self.info['timestamp']>2:
+                raise ValueError('Start Capture and wait for a live console image first')
+            self.mailbox=RawMailbox(self.session/'source_frames.bin')
+        except (OSError,ValueError,KeyError) as exc:self.error=str(exc)
+
+    def _status(self):return json.loads((self.session/'capture_status.json').read_text())
+    def isOpened(self):return self.mailbox is not None and self.error is None
+    def set(self,*args):return False
+    def get(self,prop):
+        mode=self.info['reported_capture']
+        return {self.cv2.CAP_PROP_FRAME_WIDTH:mode['width'],self.cv2.CAP_PROP_FRAME_HEIGHT:mode['height'],
+                self.cv2.CAP_PROP_FPS:mode['fps']}.get(prop,0)
+
+    def read(self):
+        end=time.monotonic()+.75
+        while time.monotonic()<end:
+            try:
+                info=self._status()
+                if info.get('state')!='capturing' or time.time()-info['timestamp']>2:
+                    self.error='Capture stopped or became stale';return False,None
+                sample=self.mailbox.read(self.sequence)
+                if sample and 0<=time.time()-sample['timestamp']<=.75:
+                    import numpy as np
+                    self.sequence=sample['sequence'];self.captured_at=sample['timestamp']
+                    if self.first_source is None:self.first_source=sample['source_frame']
+                    self.sample_source_frame=sample['source_frame']-self.first_source
+                    self.source_span=self.sample_source_frame+1
+                    self.info=info
+                    return True,np.frombuffer(sample['bgr'],dtype=np.uint8).reshape(sample['height'],sample['width'],3).copy()
+            except (OSError,ValueError,KeyError) as exc:self.error=str(exc);return False,None
+            time.sleep(.002)
+        self.error='No fresh capture frame arrived';return False,None
+
+    def release(self):
+        if self.mailbox:self.mailbox.close();self.mailbox=None

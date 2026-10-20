@@ -1,0 +1,204 @@
+"""Authenticated loopback bridge API with a persistent Gtuner UDP session.
+
+The API is an app-side transport, not a replacement for Gtuner's USB host.
+"""
+import http.client
+import http.server
+import json
+import math
+import os
+import secrets
+import socket
+import threading
+import time
+from pathlib import Path
+from urllib.parse import urlparse
+from live_link import BridgeClient
+
+
+def neutral_bridge_state():
+    return dict(status='absent',fill=None,shot_id=None,trigger=dict(armed=False,green=False,
+        valid=False,eligible=False,event_id=0,delay_ms=0,hold_ms=10,max_age_ms=100,direction='up'))
+
+
+def validate_bridge_state(state,stamp):
+    if not isinstance(state,dict) or state.get('status') not in ('absent','predicted','detected'):
+        raise ValueError('Invalid detector state')
+    if type(stamp) not in (int,float) or not math.isfinite(stamp):raise ValueError('Invalid capture timestamp')
+    fill=state.get('fill')
+    if fill is not None and (type(fill) not in (int,float) or not math.isfinite(fill) or not 0<=fill<=1):
+        raise ValueError('Invalid fill')
+    trigger=state.get('trigger')
+    if not isinstance(trigger,dict):raise ValueError('Trigger state required')
+    for key in ('armed','green','valid','eligible'):
+        if type(trigger.get(key)) is not bool:raise ValueError('Invalid trigger flag')
+    for key,low,high in [('event_id',0,0xffffffff),('delay_ms',0,250),('hold_ms',10,500),('max_age_ms',25,250)]:
+        if type(trigger.get(key)) is not int or not low<=trigger[key]<=high:raise ValueError('Invalid trigger timing')
+    if trigger.get('direction') not in ('up','down'):raise ValueError('Invalid direction')
+    shot=state.get('shot_id')
+    if shot is not None and (type(shot) is not int or not 0<=shot<=0xffffffff):raise ValueError('Invalid shot')
+
+
+class BridgeService:
+    def __init__(self,gtuner_port=26740):
+        self.client=BridgeClient(gtuner_port)
+        self.client.seq=secrets.randbelow(0x7fffffff)+1
+        self.token=secrets.token_urlsafe(32)
+        self.enabled=False;self.output_allowed=False;self.expected_slot=None
+        self.latest=None;self.error=None
+        self.lock=threading.Lock();self.wake=threading.Event();self.stopped=threading.Event()
+        owner=self
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version='HTTP/1.1'
+            disable_nagle_algorithm=True
+            def log_message(self,*args):pass
+            def setup(self):
+                super().setup();self.connection.settimeout(2)
+            def reply(self,code,data):
+                body=json.dumps(data,allow_nan=False).encode()
+                self.send_response(code);self.send_header('Content-Type','application/json')
+                self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
+            def authorized(self):
+                value=self.headers.get('Authorization','')
+                if not secrets.compare_digest(value.encode('utf-8'),('Bearer '+owner.token).encode()):
+                    self.close_connection=True;self.reply(403,{'error':'Unauthorized'});return False
+                return True
+            def do_GET(self):
+                if not self.authorized():return
+                self.reply(200,owner.status()) if self.path=='/status' else self.reply(404,{'error':'Unknown endpoint'})
+            def do_POST(self):
+                if not self.authorized():return
+                try:
+                    size=int(self.headers.get('Content-Length','0'))
+                    if not 0<size<=16384:raise ValueError('Invalid body size')
+                    body=json.loads(self.rfile.read(size))
+                    if self.path=='/state':
+                        owner.submit(body['state'],body['captured_at'])
+                    elif self.path=='/clear':owner.clear()
+                    else:self.reply(404,{'error':'Unknown endpoint'});return
+                    self.reply(200,owner.status())
+                except (ValueError,KeyError,TypeError,TimeoutError):
+                    self.close_connection=True;self.reply(400,{'error':'Invalid bridge request'})
+        self.server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Handler)
+        self.server.daemon_threads=True
+        self.url=f'http://127.0.0.1:{self.server.server_port}'
+        self.api_thread=threading.Thread(target=lambda:self.server.serve_forever(poll_interval=.1),daemon=True)
+        self.sender=threading.Thread(target=self._send,daemon=True)
+        self.api_thread.start();self.sender.start()
+
+    def status(self):
+        value=self.client.status()
+        matching=self.expected_slot is None or value.get('active_slot')==self.expected_slot
+        ready=value['hardware']=='heartbeat verified' and value.get('device_sequence') is not None and matching
+        if value['receiver']!='receiving':stage='Gtuner CV worker not receiving'
+        elif value['hardware']!='heartbeat verified' or value.get('device_sequence') is None:stage='Titan script payload echo missing'
+        elif not matching:stage='Selected Titan slot does not match'
+        else:stage='Titan bridge verified; console output unverified'
+        return dict(value,api='running',enabled=self.enabled,ready=ready,stage=stage,last_error=self.error)
+
+    def configure(self,enabled=None,expected_slot=None):
+        with self.lock:
+            if enabled is not None:self.enabled=bool(enabled)
+            self.expected_slot=expected_slot
+            if not self.enabled:self.latest=None;self.output_allowed=False
+        self.wake.set()
+
+    def allow_output(self,allowed):
+        with self.lock:self.output_allowed=bool(allowed)
+        self.wake.set()
+
+    def clear(self):
+        with self.lock:self.latest=None
+        self.wake.set()
+
+    def submit(self,state,stamp):
+        validate_bridge_state(state,stamp)
+        # Serialization gives the sender a private snapshot, never a caller-owned dict.
+        with self.lock:self.latest=(json.loads(json.dumps(state,allow_nan=False)),stamp)
+        self.wake.set()
+
+    def _send(self):
+        while not self.stopped.is_set():
+            self.wake.wait(.05);self.wake.clear()
+            with self.lock:
+                latest=self.latest;enabled=self.enabled;allowed=self.output_allowed
+            state=neutral_bridge_state();stamp=time.time()
+            if latest is not None:
+                candidate,captured_at=latest
+                age=(time.time()-captured_at)*1000
+                if 0<=age<=candidate['trigger']['max_age_ms']:
+                    state=candidate;stamp=captured_at
+            status=self.status()
+            if not (enabled and allowed and status['ready']):
+                state=dict(state,trigger=dict(state['trigger'],armed=False,eligible=False))
+            try:self.client.send(state,observed_at=stamp);self.error=None
+            except OSError as exc:self.error=str(exc)
+        try:self.client.send(neutral_bridge_state())
+        except OSError:pass
+
+    def verify(self,timeout=3,expected_slot=None):
+        self.clear()
+        first=self.client.seq+1
+        self.wake.set();end=time.monotonic()+timeout
+        while not self.stopped.is_set() and time.monotonic()<end:
+            status=self.status();sequence=status.get('device_sequence')
+            if (status['hardware']=='heartbeat verified' and type(sequence) is int
+                    and first<=sequence<=self.client.seq
+                    and (expected_slot is None or status.get('active_slot')==expected_slot)):
+                return dict(status,ready=True)
+            self.stopped.wait(.03)
+        return dict(self.status(),ready=False)
+
+    def write_config(self,path):
+        path=Path(path)
+        descriptor=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
+        with os.fdopen(descriptor,'w',encoding='utf-8') as file:
+            json.dump(dict(url=self.url,token=self.token),file)
+
+    def close(self):
+        if self.stopped.is_set():return
+        self.enabled=False;self.output_allowed=False;self.clear()
+        self.stopped.set();self.wake.set();self.sender.join(timeout=1)
+        self.server.shutdown();self.server.server_close();self.api_thread.join(timeout=1)
+        self.client.close()
+
+
+class BridgeServiceClient:
+    def __init__(self,config):
+        info=json.loads(Path(config).read_text(encoding='utf-8'))
+        address=urlparse(info['url'])
+        if (address.scheme!='http' or address.hostname!='127.0.0.1' or not address.port
+            or address.username or address.password or address.query or address.fragment or address.path not in ('','/')):
+            raise ValueError('Bridge API must use loopback HTTP')
+        self.host=address.hostname;self.port=address.port;self.token=info['token']
+        if not isinstance(self.token,str) or not 20<=len(self.token)<=128:raise ValueError('Invalid bridge API token')
+        self.connection=None;self.retry_at=0;self.last_status=None;self.last_status_at=0
+        self._request('GET','/status')
+
+    def _request(self,method,path,body=None):
+        if time.monotonic()<self.retry_at:return self.status()
+        try:
+            if self.connection is None:
+                self.connection=http.client.HTTPConnection(self.host,self.port,timeout=.3)
+                self.connection.connect();self.connection.sock.setsockopt(socket.IPPROTO_TCP,socket.TCP_NODELAY,1)
+            payload=json.dumps(body,allow_nan=False) if body is not None else None
+            self.connection.request(method,path,payload,headers={'Authorization':'Bearer '+self.token,'Content-Type':'application/json'})
+            response=self.connection.getresponse();data=response.read(16385)
+            if response.status!=200 or len(data)>16384:raise ValueError('Bridge API request rejected')
+            self.last_status=json.loads(data);self.last_status_at=time.monotonic()
+        except (OSError,ValueError,http.client.HTTPException):
+            if self.connection:self.connection.close()
+            self.connection=None;self.last_status=None;self.retry_at=time.monotonic()+.5
+        return self.status()
+
+    def status(self):
+        if self.last_status and time.monotonic()-self.last_status_at<.75:return dict(self.last_status)
+        return dict(receiver='local API unavailable',hardware='not verified',ready=False,active_slot=None,
+                    device_sequence=None,device_event=None,rtt_ms=None,stage='Local bridge service unavailable')
+
+    def send(self,state,observed_at=None):
+        return self._request('POST','/state',dict(state=state,captured_at=time.time() if observed_at is None else observed_at))
+
+    def close(self):
+        self._request('POST','/clear',{})
+        if self.connection:self.connection.close();self.connection=None
