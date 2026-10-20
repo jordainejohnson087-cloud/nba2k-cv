@@ -18,9 +18,29 @@ def encode(packet, fresh):
     fill = packet.get('fill') if status == 1 else None
     if fill is not None and (type(fill) not in (float,int) or not math.isfinite(fill) or not 0 <= fill <= 1):
         raise ValueError('Invalid fill')
-    # Version, observed/predicted/absent, fill in 0..10000 (65535 unknown), sequence.
-    return bytearray(struct.pack('>BBHI', 1, status, 65535 if fill is None else round(fill*10000),
-                                 packet.get('seq',0) & 0xffffffff))
+    trigger=packet.get('trigger')
+    if trigger is None:
+        # Legacy telemetry stays non-triggering for the old Onyx byte-zero flag.
+        return bytearray(struct.pack('>BBHI',0,status,65535 if fill is None else round(fill*10000),
+                                     packet.get('seq',0)&0xffffffff))
+    if not isinstance(trigger,dict):raise ValueError('Invalid trigger packet')
+    for key in ('armed','green','valid','eligible'):
+        if type(trigger.get(key)) is not bool:raise ValueError('Invalid trigger '+key)
+    for key,low,high in [('delay_ms',0,250),('hold_ms',10,500),('max_age_ms',25,250),('event_id',0,0xffffffff)]:
+        if type(trigger.get(key)) is not int or not low<=trigger[key]<=high:raise ValueError('Invalid trigger '+key)
+    if trigger.get('direction') not in ('up','down'):raise ValueError('Invalid direction')
+    shot=packet.get('shot_id') or 0
+    if type(shot) is not int or not 0<=shot<=0xffffffff:raise ValueError('Invalid shot ID')
+    observed_age=max(0,(time.time()-packet.get('sent_at',0))*1000)
+    remaining=max(0,trigger['max_age_ms']-observed_age)
+    fresh=fresh and remaining>=25
+    armed=bool(fresh and trigger['armed'])
+    green=bool(armed and status==1 and trigger['green'] and trigger['valid'] and trigger['eligible'])
+    # 0, 'M', v2, observed status, arm, green, direction, delay, hold,
+    # event ID, tracked shot ID, transport sequence, remaining lifetime.
+    return bytearray(struct.pack('>7BHHIIIH',0,77,2,status if fresh else 0,int(armed),int(green),
+        int(trigger['direction']=='down'),trigger['delay_ms'],trigger['hold_ms'],
+        trigger['event_id'],shot,packet.get('seq',0)&0xffffffff,max(25,int(remaining))))
 
 
 class GCVWorker:
@@ -33,6 +53,8 @@ class GCVWorker:
         self.hardware_counter = None
         self.last_hardware = None
         self.session = None
+        self.device_sequence = None
+        self.device_event = None
 
     def process(self, frame):
         import gtuner
@@ -42,7 +64,10 @@ class GCVWorker:
             try:
                 text = message.decode() if isinstance(message, bytes) else str(message)
                 if text.startswith('T2CV:'):
-                    counter = int(text[5:].strip())
+                    parts=text[5:].strip().split(':')
+                    counter = int(parts[0])
+                    if len(parts)==3:
+                        self.device_sequence=int(parts[1]);self.device_event=int(parts[2])
                     if counter != self.hardware_counter:
                         self.hardware_counter = counter
                         self.last_hardware = now
@@ -55,7 +80,7 @@ class GCVWorker:
                 break
             try:
                 packet = json.loads(data)
-                if (not isinstance(packet,dict) or packet.get('version') != 1
+                if (not isinstance(packet,dict) or packet.get('version') not in (1,2)
                     or type(packet.get('seq')) is not int or packet['seq'] < 1
                     or not isinstance(packet.get('session'),str) or len(packet['session']) != 32
                     or type(packet.get('sent_at')) not in (int,float)
@@ -71,12 +96,13 @@ class GCVWorker:
                 self.packet = packet
                 self.last_packet = now
                 ack = dict(session=packet['session'],seq=packet['seq'],
-                    hardware_counter=self.hardware_counter,
+                    hardware_counter=self.hardware_counter,device_sequence=self.device_sequence,device_event=self.device_event,
                     hardware_age_ms=(now-self.last_hardware)*1000 if self.last_hardware is not None else None)
                 self.socket.sendto(json.dumps(ack).encode(),peer)
             except (ValueError,TypeError,AttributeError,OverflowError):
                 continue
-        return frame, encode(self.packet, now-self.last_packet < STALE_SECONDS)
+        return frame, encode(self.packet, now-self.last_packet < STALE_SECONDS and
+                             0<=time.time()-self.packet.get('sent_at',0)<=STALE_SECONDS)
 
     def __del__(self):
         sock = getattr(self,'socket',None)

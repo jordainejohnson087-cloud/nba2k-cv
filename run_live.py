@@ -12,7 +12,8 @@ from pathlib import Path
 
 from meter_core import Config, Detection, MeterTracker
 from run_video import estimate_fill
-from live_link import BridgeClient, SnapshotPublisher
+from live_link import BridgeClient, SnapshotPublisher, atomic_write
+from meter_green import GreenGate, green_config, measure_green
 
 
 def open_capture(cv2, source, windows_dshow=False):
@@ -84,6 +85,16 @@ def draw_preview(cv2, frame, state, frame_no, processing_ms, budget_ms):
         label += f"  fill {state['fill']*100:.0f}%"
     cv2.rectangle(output, (0,0), (min(output.shape[1],max(760,len(label)*12)),48), (20,20,20), -1)
     cv2.putText(output, label, (12,32), cv2.FONT_HERSHEY_SIMPLEX, .65, color, 2)
+    green=state.get('green',{})
+    if green.get('valid') and state['box'] is not None:
+        left,right=round(state['box'][0]),round(state['box'][2])
+        for name in ('zone_top','zone_bottom'):
+            cv2.line(output,(left,round(green[name])),(right,round(green[name])),(0,255,0),2)
+        cv2.line(output,(left,round(green['frontier_y'])),(right,round(green['frontier_y'])),(0,255,255),1)
+    trigger=state.get('trigger')
+    if trigger:
+        text=f"{'ARMED' if trigger['armed'] else 'DRY RUN'} | green={green.get('in_green',False)} | event={trigger['event_id']}"
+        cv2.putText(output,text,(12,74),cv2.FONT_HERSHEY_SIMPLEX,.65,(0,255,255),2)
     return output
 
 
@@ -157,6 +168,12 @@ def run(args, cv2, torch, YOLO):
     publisher = SnapshotPublisher(args.out, cv2) if getattr(args,'ui_status',False) else None
     last_snapshot = 0
     stop_file = getattr(args, 'stop_file', None)
+    green_path = getattr(args,'green_settings',None)
+    config = green_config(json.loads(green_path.read_text()) if green_path else None)
+    gate = GreenGate(config)
+    green_stamp = green_path.stat().st_mtime_ns if green_path else None
+    trigger_events = 0
+    green_log = (args.out/'green_frames.jsonl').open('w',encoding='utf-8')
     start = time.perf_counter()
     last_read = None
     csv_path = args.out/'live_frames.csv'
@@ -210,7 +227,22 @@ def run(args, cv2, torch, YOLO):
                     inference_over_budget += 1
                 detections = [Detection(tuple(float(v) for v in box),float(conf)) for box,conf in zip(
                     result.boxes.xyxy.cpu().tolist(),result.boxes.conf.cpu().tolist())] if result.boxes is not None else []
-                state = tracker.update(count,detections,lambda box:estimate_fill(frame,box,args.fill_top,args.fill_bottom))
+                raw_fill = [None]
+                def read_fill(box):
+                    raw_fill[0]=estimate_fill(frame,box,args.fill_top,args.fill_bottom)
+                    return raw_fill[0]
+                state = tracker.update(count,detections,read_fill)
+                if green_path and green_path.stat().st_mtime_ns!=green_stamp:
+                    updated=green_config(json.loads(green_path.read_text()))
+                    gate.configure(updated)
+                    green_stamp=green_path.stat().st_mtime_ns
+                measurement=dict(valid=False,in_green=False,reason='no observed meter')
+                if green_path and state['status']=='detected':
+                    measurement=measure_green(frame,tracker.raw_box,raw_fill[0],gate.config,args.fill_top,args.fill_bottom)
+                state['green']=measurement
+                state['trigger']=gate.update(state,measurement,captured_at)
+                trigger_events+=int(state['trigger']['candidate'])
+                green_log.write(json.dumps(dict(frame=count,elapsed_sec=read_at-start,                    shot_id=state['shot_id'],status=state['status'],measurement=measurement,                    trigger=state['trigger']))+'\n')
                 if bridge is not None:
                     bridge_status = bridge.send(state, observed_at=captured_at)
                 if state['ended']:
@@ -233,7 +265,7 @@ def run(args, cv2, torch, YOLO):
                         publisher.submit(dict(timestamp=captured_at, frame=count,
                             elapsed_sec=read_at-start, fps=count/max(.001,read_at-start),
                             inference_ms=inference_ms, device=str(device),
-                            status=state['status'], fill=state['fill'], bridge=bridge_status), overlay if ui_enabled else None)
+                            status=state['status'], fill=state['fill'], bridge=bridge_status, green=measurement, trigger=state['trigger']), overlay if ui_enabled else None)
                         last_snapshot = read_at
                     if not args.headless:
                         cv2.imshow('NBA 2K meter detection (Q to stop)',overlay)
@@ -258,6 +290,7 @@ def run(args, cv2, torch, YOLO):
                     reason = 'user_stopped'; break
     finally:
         cap.release()
+        green_log.close()
         if bridge is not None:
             bridge.close()
         if publisher is not None:
@@ -274,6 +307,7 @@ def run(args, cv2, torch, YOLO):
     report = dict(source=source,model=str(args.model),device=str(device),frames=count,
         bridge=bridge_status, ui_preview=ui_enabled,
         preview_error=publisher.error if publisher else None,
+        green_settings=gate.config,green_candidate_events=trigger_events,
         elapsed_sec=elapsed,measured_fps=count/elapsed if elapsed else 0,
         source_fps=fps,budget_ms=budget_ms,processing_over_budget_frames=over_budget,
         requested_capture=dict(width=args.width,height=args.height,fps=args.capture_fps,
@@ -323,6 +357,7 @@ def main():
     p.add_argument('--fill-bottom',type=float,default=.90)
     p.add_argument('--seconds',type=float,default=0)
     p.add_argument('--max-frames',type=int,default=0)
+    p.add_argument('--green-settings',type=Path,help='Adjustable green calibration and trigger settings JSON')
     p.add_argument('--device',choices=['auto','0','cpu'],default='auto',help='Auto, CUDA GPU 0, or CPU')
     p.add_argument('--ui-status',action='store_true',help='Publish live status to the desktop app')
     p.add_argument('--ui-preview',action='store_true',help='Write a bounded 640px app preview at up to 10 FPS')

@@ -81,6 +81,7 @@ class BridgeClient:
         self.rtt_ms = None
         self.pending = {}
         self.hardware_counter = None
+        self.device_sequence = self.device_event = None
 
     def send(self, state, observed_at=None):
         now = self.clock()
@@ -88,6 +89,9 @@ class BridgeClient:
         packet = dict(version=1, session=self.session, seq=self.seq,
                       status=state['status'], fill=state['fill'] if state['status']=='detected' else None,
                       shot_id=state['shot_id'], sent_at=time.time() if observed_at is None else observed_at)
+        if 'trigger' in state:
+            packet['version']=2
+            packet['trigger']=state['trigger']
         try:
             self.socket.sendto(json.dumps(packet).encode(), self.peer)
         except (ConnectionResetError, ConnectionRefusedError):
@@ -116,6 +120,9 @@ class BridgeClient:
                         and 0 <= age <= 1500 and counter != self.hardware_counter):
                     self.hardware_counter = counter
                     self.last_hardware = now-age/1000
+                    for key in ('device_sequence','device_event'):
+                        value=ack.get(key)
+                        if type(value) is int and 0<=value<=0xffffffff:setattr(self,key,value)
             except (ValueError, TypeError, AttributeError):
                 continue
         return self.status()
@@ -126,7 +133,9 @@ class BridgeClient:
         hardware = linked and self.last_hardware is not None and now-self.last_hardware < 1.5
         return dict(receiver='receiving' if linked else 'waiting for Gtuner',
                     hardware='heartbeat verified' if hardware else 'not verified',
-                    rtt_ms=self.rtt_ms, sent=self.sent, acknowledged=self.acked)
+                    rtt_ms=self.rtt_ms, sent=self.sent, acknowledged=self.acked,
+                    device_sequence=self.device_sequence if hardware else None,
+                    device_event=self.device_event if hardware else None)
 
     def close(self):
         self.socket.close()

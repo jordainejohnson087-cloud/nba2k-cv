@@ -14,6 +14,7 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 from app_update import (apply_update, configured_feed, current_version,
                         download_release, fetch_manifest, newest_download)
 from app_model import import_model, managed_model
+from run_live import green_config
 
 
 PROJECT=Path(__file__).resolve().parent
@@ -86,6 +87,11 @@ class Desktop(tk.Tk):
         self.bridge_enabled=tk.BooleanVar(value=saved.get('bridge_enabled',False))
         self.bridge_status=tk.StringVar(value='Bridge off • Titan Two hardware not verified')
         self.live_metrics=tk.StringVar(value='Preview idle')
+        try:green=green_config(saved.get('green',{}))
+        except ValueError:green=green_config()
+        self.trigger_armed=tk.BooleanVar(value=False)
+        self.green_vars={key:tk.StringVar(value=str(value)) for key,value in green.items() if key!='armed'}
+        self.green_status=tk.StringVar(value='Green detector: awaiting observed frames • trigger off')
         self.record=tk.BooleanVar(value=False)
         self.raw=tk.BooleanVar(value=False)
         self.preview=tk.BooleanVar(value=True)
@@ -158,7 +164,7 @@ class Desktop(tk.Tk):
         ttk.Label(self.bridge_tab,text='Titan Two / Gtuner bridge',font=('Segoe UI',14,'bold')).pack(anchor='w',pady=8)
         ttk.Label(self.bridge_tab,text=(
             '1. Connect Titan Two PROG to the PC and your controller to Titan Two INPUT-A.\n\n'
-            '2. In Gtuner IV, compile bridge/titan_heartbeat.gpc and run it on Titan Two.\n\n'
+            '2. In Gtuner IV, compile bridge/titan_meter.gpc and run it on Titan Two.\n\n'
             '3. Open bridge/gtuner_meter.py in Gtuner Computer Vision. Select a display/video source '
             'that does not compete with the app capture card. Start the GCV worker.\n\n'
             '4. In Live Detection, choose your trained weight, CUDA Python environment, and controller profile. '
@@ -167,8 +173,25 @@ class Desktop(tk.Tk):
             'Receiver acknowledgements verify the local software link. A changing GPC heartbeat verifies the device return path. '
             'Neither proves the console received meter data. Controller profile is a manual selection, not device discovery.\n\n'
             'Telemetry expires after 250 ms in Gtuner. Predicted boxes have no measured fill. '
-            'The included GPC script is a connection diagnostic and leaves controller inputs unchanged.'),
+            'titan_meter.gpc requires a physical Square / Xbox X hold and a fresh green event. Validate the color detector in dry-run mode before enabling its trigger.'),
             wraplength=960,justify='left').pack(anchor='w',pady=10)
+        calibration=ttk.LabelFrame(self.bridge_tab,text='Green detection and stick flick',padding=10)
+        calibration.pack(fill='x',pady=8)
+        fields=[('Hue low','hue_low'),('Hue high','hue_high'),('Saturation min','saturation_min'),
+            ('Brightness min','value_min'),('Green row fraction','row_coverage'),('Confidence min','min_confidence'),
+            ('Confirm frames','confirmations'),('Maximum age ms','max_age_ms'),('Rearm absence ms','rearm_ms'),
+            ('Flick delay ms','delay_ms'),('Flick hold ms','hold_ms')]
+        for index,(title,key) in enumerate(fields):
+            row,column=divmod(index,3)
+            ttk.Label(calibration,text=title).grid(row=row,column=column*2,sticky='w',padx=4,pady=3)
+            ttk.Entry(calibration,textvariable=self.green_vars[key],width=9).grid(row=row,column=column*2+1,padx=4)
+        ttk.Label(calibration,text='Flick direction').grid(row=4,column=0,sticky='w',padx=4)
+        ttk.Combobox(calibration,textvariable=self.green_vars['direction'],values=('up','down'),
+            state='readonly',width=9).grid(row=4,column=1)
+        ttk.Checkbutton(calibration,text='Enable calibrated green trigger (hold shoot button)',
+            variable=self.trigger_armed).grid(row=5,column=0,columnspan=6,sticky='w',pady=6)
+        ttk.Button(calibration,text='Apply Detection / Flick Settings',command=self._apply_green).grid(row=6,column=0,columnspan=6,sticky='w')
+        ttk.Label(calibration,textvariable=self.green_status,wraplength=950).grid(row=7,column=0,columnspan=6,sticky='w',pady=4)
         ttk.Label(self.bridge_tab,textvariable=self.bridge_status).pack(anchor='w',pady=10)
         ttk.Button(self.bridge_tab,text='Open Bridge Files',command=self._open_bridge).pack(anchor='w')
         results=ttk.Frame(self.tabs,padding=14);self.tabs.add(results,text='Results')
@@ -216,12 +239,30 @@ class Desktop(tk.Tk):
         # Source checkouts have these files; release builds embed them to stay
         # compatible with the first desktop updater's fixed filename allowlist.
         folder=PROJECT/'bridge'
-        if not (folder/'gtuner_meter.py').is_file() or not (folder/'titan_heartbeat.gpc').is_file():
-            from run_live import GTUNER_SOURCE, HEARTBEAT_SOURCE
+        if hasattr(__import__('run_live'),'METER_GPC_SOURCE'):
+            from run_live import GTUNER_SOURCE, HEARTBEAT_SOURCE, METER_GPC_SOURCE
             folder.mkdir(exist_ok=True)
             (folder/'gtuner_meter.py').write_text(GTUNER_SOURCE,encoding='utf-8')
             (folder/'titan_heartbeat.gpc').write_text(HEARTBEAT_SOURCE,encoding='utf-8')
+            (folder/'titan_meter.gpc').write_text(METER_GPC_SOURCE,encoding='utf-8')
         self._open_path(folder)
+
+    def _green_values(self):
+        defaults=green_config()
+        values={key:(str(var.get()) if key=='direction' else
+            float(var.get()) if type(defaults[key]) is float else int(var.get()))
+            for key,var in self.green_vars.items()}
+        return green_config(dict(values,armed=self.trigger_armed.get()))
+
+    def _apply_green(self):
+        try:config=self._green_values()
+        except ValueError as exc:
+            messagebox.showerror('Invalid green settings',str(exc));return
+        if self.live_active and self.active_out:
+            from run_live import atomic_write
+            atomic_write(self.active_out/'green_settings.json',json.dumps(config).encode())
+        self._save()
+        self.status.set('Green settings applied • '+('trigger enabled' if config['armed'] else 'dry run'))
 
     def _choose_environment(self):
         chosen=filedialog.askopenfilename(parent=self,title="Choose environment Python executable",
@@ -285,10 +326,13 @@ class Desktop(tk.Tk):
             return None
 
     def _save(self):
+        try:green=self._green_values()
+        except ValueError:green=load_settings().get('green',green_config())
         SETTINGS.write_text(json.dumps(dict(model=self.model.get(),source=self.source.get(),
             width=self.width.get(),height=self.height.get(),fps=self.fps.get(),
             imgsz=self.imgsz.get(),seconds=self.seconds.get(),environment=self.environment.get(),
-            compute=self.compute.get(),controller=self.controller.get(),bridge_enabled=self.bridge_enabled.get()),indent=2),encoding='utf-8')
+            compute=self.compute.get(),controller=self.controller.get(),bridge_enabled=self.bridge_enabled.get(),
+            green=dict(green,armed=False)),indent=2),encoding='utf-8')
 
     def _out(self,prefix):
         base=PROJECT/'test_results'/f'{prefix}_{time.strftime("%Y%m%d_%H%M%S")}'
@@ -318,6 +362,9 @@ class Desktop(tk.Tk):
         if self._busy():return
         values=self._settings()
         if not values:return
+        try:green=self._green_values()
+        except ValueError as exc:
+            messagebox.showerror('Invalid green settings',str(exc));return
         model=Path(self.model.get())
         if not model.is_file():
             messagebox.showerror('Model missing','Select your trained best.pt file first.');return
@@ -327,6 +374,8 @@ class Desktop(tk.Tk):
         if not executable:return
         cmd=[executable,str(PROJECT/'run_live.py'),'--model',str(model),
              '--out',str(out),'--imgsz',str(values[3])] + self._common(values)
+        (out/'green_settings.json').write_text(json.dumps(green),encoding='utf-8')
+        cmd += ['--green-settings',str(out/'green_settings.json')]
         cmd += ['--headless','--ui-status','--device',self.compute.get(),'--stop-file',str(out/'stop.request')]
         if self.preview.get():cmd.append('--ui-preview')
         if self.bridge_enabled.get():cmd += ['--bridge-port','26740']
@@ -449,8 +498,13 @@ class Desktop(tk.Tk):
             if bridge:
                 self.bridge_status.set("Bridge stale • hardware not verified" if age>.75 else
                     f"Gtuner: {bridge['receiver']} | Titan Two: {bridge['hardware']} | "
-                    f"local ACK {bridge.get('rtt_ms') or 0:.1f} ms (not console latency)")
-            image=self.active_out/"preview.png"
+                    f"local ACK {bridge.get('rtt_ms') or 0:.1f} ms | device event {bridge.get('device_event')} (not console confirmation)")
+            if 'green' in data:
+                measurement=data['green'];trigger=data.get('trigger',{})
+                self.green_status.set(f"{'ARMED' if trigger.get('armed') else 'DRY RUN'} | "
+                    f"in green: {measurement.get('in_green',False)} | event {trigger.get('event_id',0)} | "
+                    f"{measurement.get('reason','')}" + (' • STALE' if age>.25 else ''))
+            image=self.active_out/'preview.png'
             stamp=image.stat().st_mtime_ns
             if stamp!=self.last_preview_stamp:
                 self.preview_image=tk.PhotoImage(file=str(image))

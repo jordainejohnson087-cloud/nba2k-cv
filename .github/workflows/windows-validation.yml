@@ -5,6 +5,7 @@ on:
     paths:
       - '.github/workflows/windows-validation.yml'
       - 'scripts/**'
+      - 'meter_green.py'
       - 'live_link.py'
       - 'bridge/**'
       - 'app.py'

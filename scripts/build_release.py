@@ -29,10 +29,13 @@ def build(archive, repository):
     # Bundle pure-Python support into run_live.py, and adapter resources as
     # literals, instead of shipping new archive members those clients reject.
     live = files['run_live.py'].decode('utf-8')
-    live = live.replace('from live_link import BridgeClient, SnapshotPublisher',
+    live = live.replace('from live_link import BridgeClient, SnapshotPublisher, atomic_write',
                         (ROOT/'live_link.py').read_text(encoding='utf-8'))
+    live = live.replace('from meter_green import GreenGate, green_config, measure_green',
+                        (ROOT/'meter_green.py').read_text(encoding='utf-8'))
     resources = '\nGTUNER_SOURCE = ' + repr((ROOT/'bridge/gtuner_meter.py').read_text(encoding='utf-8'))
     resources += '\nHEARTBEAT_SOURCE = ' + repr((ROOT/'bridge/titan_heartbeat.gpc').read_text(encoding='utf-8')) + '\n'
+    resources += '\nMETER_GPC_SOURCE = ' + repr((ROOT/'bridge/titan_meter.gpc').read_text(encoding='utf-8')) + '\n'
     live = live.replace("if __name__ == '__main__': main()", resources + "\nif __name__ == '__main__': main()")
     compile(live, 'run_live.py', 'exec')
     files['run_live.py'] = live.encode('utf-8')

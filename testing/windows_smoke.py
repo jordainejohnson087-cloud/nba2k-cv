@@ -41,6 +41,11 @@ def main():
                     assert command[command.index('--seconds')+1]=='0.0'
                     assert command[command.index('--device')+1]=='0'
                     assert '--ui-preview' in command and '--bridge-port' in command
+                    assert '--green-settings' in command
+                    assert json.loads((out/'green_settings.json').read_text())['armed'] is False
+                    app.green_vars['delay_ms'].set('35')
+                    app._apply_green()
+                    assert json.loads((out/'green_settings.json').read_text())['delay_ms']==35
                     assert json.loads((out/'app_profile.json').read_text())['controller']=='Xbox / GameSir'
                 import numpy as np
                 from live_link import snapshot

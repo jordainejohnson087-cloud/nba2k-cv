@@ -1,0 +1,95 @@
+#pragma METAINFO("NBA2K CV Meter Bridge", 2, 0, "NBA2K CV")
+#include <PS4.gph>
+// For the app's v2 packet only; byte zero is always zero (old Onyx will not fire).
+// Hold Square / Xbox X to start the down-stick phase. A fresh green event flicks.
+uint32 heartbeat_counter;
+uint32 packet_seq;
+uint32 incoming_seq;
+uint32 event_id;
+uint32 last_event;
+uint32 fired_event;
+uint16 packet_age = 1000;
+uint16 ttl = 100;
+uint16 delay_ms;
+uint16 hold_ms;
+uint16 active_delay;
+uint16 active_hold;
+uint16 phase_time;
+int16 flick_value;
+int16 active_value;
+uint8 phase;
+bool armed;
+bool green;
+bool fired;
+
+main {
+    combo_run(Heartbeat);
+    if(packet_age < 1000) packet_age += elapsed_time();
+    if(gcv_ready()) {
+        if(gcv_read(0) == 0 && gcv_read(1) == 77 && gcv_read(2) == 2) {
+            incoming_seq = ((uint32)gcv_read(19) << 24) | ((uint32)gcv_read(20) << 16)
+                         | ((uint32)gcv_read(21) << 8) | (uint32)gcv_read(22);
+            if(incoming_seq != packet_seq) {
+                packet_seq = incoming_seq;
+                packet_age = 0;
+                armed = gcv_read(4) == 1;
+                green = gcv_read(3) == 1 && gcv_read(5) == 1;
+                flick_value = -100;
+                if(gcv_read(6) == 1) flick_value = 100;
+                delay_ms = ((uint16)gcv_read(7) << 8) | (uint16)gcv_read(8);
+                hold_ms = ((uint16)gcv_read(9) << 8) | (uint16)gcv_read(10);
+                event_id = ((uint32)gcv_read(11) << 24) | ((uint32)gcv_read(12) << 16)
+                         | ((uint32)gcv_read(13) << 8) | (uint32)gcv_read(14);
+                ttl = ((uint16)gcv_read(23) << 8) | (uint16)gcv_read(24);
+                if(delay_ms > 250 || hold_ms < 10 || hold_ms > 500 || ttl < 25 || ttl > 250) armed = FALSE;
+            }
+        } else { armed = FALSE; }
+    }
+    // R3 overrides and cancels an in-progress flick, including the delay phase.
+    if(get_actual(PS4_R3)) {
+        phase = 0;
+        fired = TRUE;
+        last_event = event_id;
+        set_val(BUTTON_17, get_actual(PS4_R3));
+        set_val(PS4_RX, 0);
+        set_val(PS4_RY, 0);
+    } else if(!armed || packet_age > ttl) {
+        // Expired or disabled: return to physical controller input.
+        phase = 0;
+        fired = TRUE;
+        last_event = event_id;
+        if(!get_actual(BUTTON_17)) fired = FALSE;
+    } else if(!get_actual(BUTTON_17)) {
+        // No release-trigger fallback. Green detection is the only CV trigger.
+        phase = 0;
+        fired = FALSE;
+        last_event = event_id;
+    } else {
+        set_val(BUTTON_17, 0);
+        if(green && event_id != 0 && event_id != last_event && !fired) {
+            fired = TRUE;
+            last_event = event_id;
+            fired_event = event_id;
+            phase = 1;
+            phase_time = 0;
+            active_delay = delay_ms;
+            active_hold = hold_ms;
+            active_value = flick_value;
+        }
+        if(phase == 1) {
+            if(phase_time >= active_delay) { phase = 2; phase_time = 0; }
+            else phase_time += elapsed_time();
+        }
+        if(phase == 2) {
+            set_val(PS4_RY, active_value);
+            if(phase_time >= active_hold) { phase = 3; }
+            else phase_time += elapsed_time();
+        } else if(phase == 3) { set_val(PS4_RY, 0); }
+        else if(phase == 1) { set_val(PS4_RY, -active_value); }
+        else { set_val(PS4_RY, -flick_value); }
+    }
+}
+combo Heartbeat {
+    wait(500);
+    printf("GCMD:ComputerVision.PY:T2CV:%d:%d:%d", heartbeat_counter++, packet_seq, fired_event);
+}
