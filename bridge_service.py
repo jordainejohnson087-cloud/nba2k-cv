@@ -39,6 +39,9 @@ def validate_bridge_state(state,stamp):
     if shot is not None and (type(shot) is not int or not 0<=shot<=0xffffffff):raise ValueError('Invalid shot')
 
 
+_KEEP_EXPECTED_SLOT=object()
+
+
 class BridgeService:
     def __init__(self,gtuner_port=26740):
         self.client=BridgeClient(gtuner_port)
@@ -92,17 +95,22 @@ class BridgeService:
         matching=self.expected_slot is None or value.get('active_slot')==self.expected_slot
         sequence=value.get('device_sequence')
         echo=type(sequence) is int and self.first_sequence<=sequence<=self.client.seq
-        ready=value['hardware']=='heartbeat verified' and echo and matching
+        slot=value.get('active_slot')
+        slot_valid=type(slot) is int and 1<=slot<=9
+        ready=value['hardware']=='heartbeat verified' and echo and slot_valid and matching
         if value['receiver']!='receiving':stage='Gtuner CV worker not receiving'
         elif value['hardware']!='heartbeat verified' or not echo:stage='Titan script payload echo missing'
+        elif not slot_valid:stage='Titan slot echo missing; install the current meter GPC'
         elif not matching:stage='Selected Titan slot does not match'
         else:stage='Titan bridge verified; console output unverified'
         return dict(value,api='running',enabled=self.enabled,ready=ready,stage=stage,last_error=self.error)
 
-    def configure(self,enabled=None,expected_slot=None):
+    def configure(self,enabled=None,expected_slot=_KEEP_EXPECTED_SLOT):
+        if expected_slot is not _KEEP_EXPECTED_SLOT and expected_slot is not None and (type(expected_slot) is not int or not 1<=expected_slot<=9):
+            raise ValueError('Expected Titan slot must be 1 through 9 or None')
         with self.lock:
             if enabled is not None:self.enabled=bool(enabled)
-            self.expected_slot=expected_slot
+            if expected_slot is not _KEEP_EXPECTED_SLOT:self.expected_slot=expected_slot
             if not self.enabled:self.latest=None;self.output_allowed=False
         self.wake.set()
 
@@ -145,7 +153,7 @@ class BridgeService:
         self.wake.set();end=time.monotonic()+timeout
         while not self.stopped.is_set() and time.monotonic()<end:
             status=self.status();sequence=status.get('device_sequence')
-            if (status['hardware']=='heartbeat verified' and type(sequence) is int
+            if (status['ready'] and type(sequence) is int
                     and first<=sequence<=self.client.seq
                     and (expected_slot is None or status.get('active_slot')==expected_slot)):
                 return dict(status,ready=True)

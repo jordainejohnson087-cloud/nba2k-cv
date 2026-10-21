@@ -110,7 +110,7 @@ class BridgeStartupTests(unittest.TestCase):
         app=SimpleNamespace(_busy=Mock(return_value=False),bridge_service=service,
             titan_slot=variable('4'),trigger_armed=Mock(),_apply_green=Mock(),
             bridge_setup_status=Mock(),gtuner_path=variable('Gtuner.exe'),auto_gtuner=variable(True),
-            auto_slot=variable(True),_export_bridge=Mock(return_value='bridge'),messages=queue.Queue())
+            auto_slot=variable(True),_export_bridge=Mock(return_value='bridge'),messages=queue.Queue(),after=Mock())
         with patch('app.discover_gtuner',return_value='Gtuner.exe'),patch('app.launch_gtuner_background'),patch('app.GtunerController') as factory,patch('app.threading.Thread') as thread:
             thread.return_value.start.side_effect=lambda:thread.call_args.kwargs['target']()
             Desktop._prepare_bridge(app)
@@ -225,3 +225,73 @@ class TitanHardwareDiscoveryTests(unittest.TestCase):
             Desktop._prepare_bridge(app)
             discover.assert_not_called()
         app.bridge_setup_status.set.assert_called_once_with('Connect PROG with a data cable')
+
+
+class BridgeCancellationTests(unittest.TestCase):
+    def test_cancel_during_accessibility_read_prevents_slot_switch_and_result(self):
+        from app import Desktop
+        from types import SimpleNamespace
+        import queue
+        def variable(value):
+            result=Mock();result.get.return_value=value;return result
+        service=Mock();service.verify.return_value=dict(ready=False,receiver='receiving',stage='No echo')
+        app=SimpleNamespace(_busy=Mock(return_value=False),bridge_service=service,
+            titan_slot=variable('4'),trigger_armed=Mock(),_apply_green=Mock(),
+            bridge_setup_status=Mock(),gtuner_path=variable('Gtuner.exe'),auto_gtuner=variable(True),
+            auto_slot=variable(True),_export_bridge=Mock(return_value='bridge'),messages=queue.Queue(),after=Mock())
+        with patch('app.discover_gtuner',return_value='Gtuner.exe'),patch('app.launch_gtuner_background'),patch('app.GtunerController') as factory,patch('app.threading.Thread') as thread:
+            factory.return_value.read_slots.side_effect=lambda:(Desktop._cancel_pending_bridge(app) or {4:'NBA2K CV Meter Bridge'})
+            thread.return_value.start.side_effect=lambda:thread.call_args.kwargs['target']()
+            Desktop._prepare_bridge(app)
+            factory.return_value.select_slot.assert_not_called()
+            factory.return_value.close.assert_called_once()
+        self.assertTrue(app.messages.empty());self.assertFalse(app.preparing_bridge)
+
+    def test_setup_timeout_invalidates_old_check_and_disarms_output(self):
+        from app import Desktop
+        from types import SimpleNamespace
+        app=SimpleNamespace(gtuner_discovery_generation=7,preparing_bridge=True,bridge_service=Mock(),
+            trigger_armed=Mock(),bridge_setup_status=Mock(),pending_reconnect=False)
+        Desktop._bridge_prepare_timeout(app,6)
+        self.assertTrue(app.preparing_bridge)
+        Desktop._bridge_prepare_timeout(app,7)
+        self.assertFalse(app.preparing_bridge);self.assertEqual(app.gtuner_discovery_generation,8)
+        app.bridge_service.allow_output.assert_called_once_with(False)
+        app.trigger_armed.set.assert_called_once_with(False)
+
+    def test_queued_old_results_do_not_stop_current_ai_or_overwrite_current_setup(self):
+        from app import Desktop
+        from types import SimpleNamespace
+        from pathlib import Path
+        import queue
+        app=SimpleNamespace(messages=queue.Queue(),gtuner_discovery_generation=8,preparing_bridge=True,
+            process_out=Path('new-ai'),live_active=True,bridge_service=Mock(),
+            _capture_tick=Mock(),_bridge_tick=Mock(),_preview_tick=Mock(),after=Mock(),_poll=Mock())
+        app.messages.put(('bridge_prepared',(False,dict(ready=True,prepare_generation=7),None,None)))
+        app.messages.put(('done',(0,'old-probe')))
+        Desktop._poll(app)
+        self.assertTrue(app.preparing_bridge);self.assertTrue(app.live_active)
+        app.bridge_service.configure.assert_not_called()
+
+    def test_selected_slot_overrides_previous_verification_when_ai_starts(self):
+        from app import Desktop
+        from types import SimpleNamespace
+        slot=Mock();slot.get.return_value='4'
+        automatic=Mock();automatic.get.return_value=True
+        app=SimpleNamespace(auto_slot=automatic,titan_slot=slot,verified_titan_slot=2)
+        self.assertEqual(Desktop._desired_bridge_slot(app),4)
+
+    def test_repeated_missing_scans_do_not_rewrite_settings_or_cancel_each_time(self):
+        from app import Desktop
+        from types import SimpleNamespace
+        from pathlib import Path
+        import tempfile
+        app=SimpleNamespace(hardware_inventory={},hardware_autoconnect_id=None,titan_usb_status=Mock(),
+            trigger_armed=Mock(),_apply_green=Mock(),bridge_service=Mock(),hardware_closing=True)
+        app.trigger_armed.get.return_value=False
+        value=dict(state='missing',devices=[],auto_connect=False,message='No Titan')
+        with tempfile.TemporaryDirectory() as folder,patch('app.PROJECT',Path(folder)):
+            Desktop._handle_titan_hardware(app,value)
+            Desktop._handle_titan_hardware(app,value)
+        app._apply_green.assert_called_once()
+        self.assertEqual(app.gtuner_discovery_generation,1)

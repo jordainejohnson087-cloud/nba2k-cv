@@ -66,6 +66,7 @@ class Desktop(tk.Tk):
         self.minsize(1000,600)
         self._theme()
         self.process=None
+        self.process_out=None
         self.capture_process=None
         self.capture_active=False
         self.capture_out=None
@@ -372,11 +373,13 @@ class Desktop(tk.Tk):
             variable=self.auto_gtuner,command=self._save).pack(anchor='w',pady=5)
         slot_controls=ttk.Frame(launcher);slot_controls.pack(fill='x',pady=6)
         ttk.Label(slot_controls,text='Default / selected slot').pack(side='left')
-        ttk.Combobox(slot_controls,textvariable=self.titan_slot,values=('Auto (meter bridge)',*tuple(str(i) for i in range(1,10))),
-            state='readonly',width=20).pack(side='left',padx=8)
+        slot_menu=ttk.Combobox(slot_controls,textvariable=self.titan_slot,values=('Auto (meter bridge)',*tuple(str(i) for i in range(1,10))),
+            state='readonly',width=20)
+        slot_menu.pack(side='left',padx=8)
+        slot_menu.bind('<<ComboboxSelected>>',lambda event:self._bridge_slot_changed())
         ttk.Button(slot_controls,text='Switch Slot',command=lambda:self._prepare_bridge(force_slot=True)).pack(side='left')
         ttk.Checkbutton(launcher,text='Automatically select this slot on startup / reconnect / before capture',
-            variable=self.auto_slot,command=self._save).pack(anchor='w')
+            variable=self.auto_slot,command=self._bridge_slot_changed).pack(anchor='w')
         connection=ttk.Frame(launcher);connection.pack(fill='x',pady=6)
         ttk.Button(connection,text='Connect / Reconnect',command=self._connect_bridge).pack(side='left')
         ttk.Button(connection,text='Disconnect App Bridge',command=self._disconnect_bridge).pack(side='left',padx=8)
@@ -483,6 +486,7 @@ class Desktop(tk.Tk):
         threading.Thread(target=work,daemon=True).start()
 
     def _handle_titan_hardware(self,value):
+        previous=getattr(self,'hardware_inventory',{})
         self.hardware_scan_pending=False
         self.hardware_inventory=value
         self.titan_usb_status.set(value['message'])
@@ -498,8 +502,10 @@ class Desktop(tk.Tk):
                 self._connect_bridge()
         elif value.get('state') not in ('unavailable','unsupported'):
             self.hardware_autoconnect_id=None
-            self.trigger_armed.set(False);self._apply_green()
-            if self.bridge_service:self.bridge_service.allow_output(False);self.bridge_service.clear()
+            if previous.get('state')!=value.get('state') or self.trigger_armed.get():
+                Desktop._cancel_pending_bridge(self)
+                if self.bridge_service:self.bridge_service.allow_output(False);self.bridge_service.clear()
+                self.trigger_armed.set(False);self._apply_green()
         if not self.hardware_closing:self.hardware_scan_after=self.after(3000,self._scan_titan_hardware)
 
     def _startup_bridge(self):
@@ -550,7 +556,7 @@ class Desktop(tk.Tk):
 
     def _disconnect_bridge(self):
         self.pending_reconnect=False;self.resume_after_reconnect=False;self.capture_launch_requested=False
-        self.gtuner_discovery_generation+=1
+        Desktop._cancel_pending_bridge(self)
         self.bridge_enabled.set(False);self.trigger_armed.set(False);self._apply_green()
         if self.bridge_service:self.bridge_service.configure(enabled=False)
         self.bridge_setup_status.set('App bridge disconnected. Capture and AI can continue.')
@@ -571,6 +577,32 @@ class Desktop(tk.Tk):
                 self.pending_reconnect=False
                 self.bridge_setup_status.set('Reconnect attempts exhausted. Check USB PROG and the Gtuner CV worker, then Connect / Reconnect.')
 
+    def _desired_bridge_slot(self):
+        if self.auto_slot.get() and self.titan_slot.get()!='Auto (meter bridge)':return slot_number(self.titan_slot.get())
+        return getattr(self,'verified_titan_slot',None)
+
+    def _bridge_slot_changed(self):
+        Desktop._cancel_pending_bridge(self)
+        self.verified_titan_slot=None
+        self.trigger_armed.set(False)
+        if self.bridge_service:
+            self.bridge_service.allow_output(False);self.bridge_service.clear()
+            self.bridge_service.configure(expected_slot=Desktop._desired_bridge_slot(self))
+        self._apply_green()
+        if self.bridge_enabled.get():self._prepare_bridge()
+
+    def _cancel_pending_bridge(self):
+        self.gtuner_discovery_generation=getattr(self,'gtuner_discovery_generation',0)+1
+        self.preparing_bridge=False
+
+    def _bridge_prepare_timeout(self,generation):
+        if generation!=self.gtuner_discovery_generation or not self.preparing_bridge:return
+        Desktop._cancel_pending_bridge(self)
+        if self.bridge_service:self.bridge_service.allow_output(False);self.bridge_service.clear()
+        self.trigger_armed.set(False)
+        self.bridge_setup_status.set('Bridge setup timed out. Output is disabled; check Gtuner and the USB/CV worker before reconnecting.')
+        if self.pending_reconnect and self.bridge_enabled.get():self.after(3000,self._retry_bridge)
+
     def _prepare_bridge(self,for_capture=False,force_slot=False,read_only=False):
         if self._busy(allow_capture=True,allow_detection=True):return
         if self.bridge_service is None:
@@ -581,23 +613,29 @@ class Desktop(tk.Tk):
         try:selected=None if self.titan_slot.get()=='Auto (meter bridge)' else slot_number(self.titan_slot.get())
         except ValueError as exc:self.bridge_setup_status.set(str(exc));return
         self.trigger_armed.set(False);self._apply_green()
+        self.gtuner_discovery_generation=getattr(self,'gtuner_discovery_generation',0)+1
+        generation=self.gtuner_discovery_generation
         self.preparing_bridge=True
         self.bridge_setup_status.set('Checking the live bridge before opening any Gtuner window...')
         executable=self.gtuner_path.get();auto_host=self.auto_gtuner.get()
         switch=self.auto_slot.get() or force_slot
         service=self.bridge_service
+        service.configure(expected_slot=selected if switch else None)
         try:folder=self._export_bridge()
         except (OSError,ValueError) as exc:
             self.preparing_bridge=False;self.bridge_setup_status.set(str(exc));return
+        def still_current():return generation==self.gtuner_discovery_generation and not getattr(self,'hardware_closing',False)
         def work():
             controller=None;slots=None;result=None;error=None;found=None
             try:
+                if not still_current():return
                 target=selected if switch else None
                 fast=service.verify(timeout=1,expected_slot=target)
                 if fast['ready'] and not force_slot and not read_only:
                     result=fast
                 else:
                     found=discover_gtuner(executable)
+                    if not still_current():return
                     if found and auto_host:launch_gtuner_background(found,folder)
                     # Receiver availability and slot selection are independent.
                     # A missing CV worker must not skip loading the selected slot.
@@ -605,11 +643,14 @@ class Desktop(tk.Tk):
                     if current['ready'] and not force_slot and not read_only:
                         result=current
                     elif found:
+                        if not still_current():return
                         controller=GtunerController(found);controller.connect()
                         try:slots=controller.read_slots()
                         except Exception:slots={}
                         if switch and not read_only:
                             if target is None:target=choose_meter_slot(slots)
+                            if not still_current():return
+                            service.configure(expected_slot=target)
                             controller.select_slot(target)
                         result=service.verify(timeout=3,expected_slot=target if switch and not read_only else None)
                         if read_only:result=dict(result,read_only=True)
@@ -624,7 +665,8 @@ class Desktop(tk.Tk):
                 else:result=dict(result,ready=False)
             finally:
                 if controller is not None:controller.close()
-            self.messages.put(('bridge_prepared',(False,result,error,slots)))
+            if still_current():self.messages.put(('bridge_prepared',(False,dict(result or {},prepare_generation=generation),error,slots)))
+        self.after(12000,lambda:self._bridge_prepare_timeout(generation))
         threading.Thread(target=work,daemon=True).start()
 
     def _green_values(self):
@@ -638,6 +680,8 @@ class Desktop(tk.Tk):
         try:config=self._green_values()
         except ValueError as exc:
             messagebox.showerror('Invalid green settings',str(exc));return
+        if config['armed'] and getattr(self,'preparing_bridge',False):
+            self.trigger_armed.set(False);config=dict(config,armed=False)
         if self.live_active and self.active_out:
             from run_live import atomic_write
             atomic_write(self.active_out/'green_settings.json',json.dumps(config).encode())
@@ -907,7 +951,7 @@ class Desktop(tk.Tk):
         cmd += ['--headless','--ui-status','--device',self.compute.get(),'--stop-file',str(out/'stop.request')]
         cmd += ['--capture-session',str(self.capture_out)]
         if self.bridge_enabled.get() and self.bridge_service:
-            self.bridge_service.configure(enabled=True,expected_slot=getattr(self,'verified_titan_slot',None))
+            self.bridge_service.configure(enabled=True,expected_slot=Desktop._desired_bridge_slot(self))
             config=out/'bridge_service.json';self.bridge_service.write_config(config)
             cmd += ['--bridge-service',str(config)]
             active=getattr(self,'verified_titan_slot',None)
@@ -973,6 +1017,7 @@ class Desktop(tk.Tk):
             self.live_active=False
             self.status.set('Could not start');messagebox.showerror('Start failed',str(exc));return
         process=self.process
+        self.process_out=out
         def read_output():
             for line in process.stdout:self.messages.put(('text',line))
             self.messages.put(('done',(process.wait(),str(out))))
@@ -983,7 +1028,7 @@ class Desktop(tk.Tk):
             self.bridge_service.allow_output(False);self.bridge_service.clear()
         self.trigger_armed.set(False)
         if not reconnect:
-            self.gtuner_discovery_generation+=1
+            Desktop._cancel_pending_bridge(self)
             self.pending_reconnect=False;self.resume_after_reconnect=False;self.capture_launch_requested=False
         if self.process and self.process.poll() is None:
             if self.live_active and self.active_out:
@@ -1018,8 +1063,9 @@ class Desktop(tk.Tk):
                 elif kind=='titan_hardware':
                     self._handle_titan_hardware(value)
                 elif kind=='bridge_prepared':
-                    self.preparing_bridge=False
                     capture,result,error,slots=value
+                    if result and result.get('prepare_generation',self.gtuner_discovery_generation)!=self.gtuner_discovery_generation:continue
+                    self.preparing_bridge=False
                     ready=bool(result and result.get('ready'))
                     read_only=bool(result and result.get('read_only'))
                     self._show_slots(slots,result.get('active_slot') if ready else None)
@@ -1069,6 +1115,7 @@ class Desktop(tk.Tk):
                     self._finish_update(value)
                 else:
                     code,out=value
+                    if self.process_out is not None and str(self.process_out)!=out:continue
                     self.live_active=False
                     if not self.capture_active:self._close_raw_preview()
                     if self.pending_reconnect:self.after(1000,self._retry_bridge)
@@ -1348,6 +1395,7 @@ class Desktop(tk.Tk):
         else:self.destroy()
 
     def destroy(self):
+        Desktop._cancel_pending_bridge(self)
         self.hardware_closing=True
         self.capture_handoff_pending=False
         if getattr(self,'capture_active',False) and self.capture_out:

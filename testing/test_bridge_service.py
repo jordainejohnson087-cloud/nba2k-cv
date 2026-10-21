@@ -84,3 +84,20 @@ class BridgeApiTests(unittest.TestCase):
                 active_slot=4,device_sequence=service.first_sequence,device_event=0)
             self.assertTrue(service.status()['ready'])
         finally:service.close()
+
+    def test_enable_changes_preserve_slot_and_missing_slot_never_becomes_ready(self):
+        service=BridgeService()
+        try:
+            service.configure(expected_slot=4)
+            service.configure(enabled=True)
+            self.assertEqual(service.expected_slot,4)
+            service.configure(enabled=False)
+            self.assertEqual(service.expected_slot,4)
+            service.configure(expected_slot=None)
+            service.client.status=lambda:dict(receiver='receiving',hardware='heartbeat verified',
+                active_slot=None,device_sequence=service.client.seq,device_event=0)
+            self.assertFalse(service.status()['ready'])
+            self.assertFalse(service.verify(timeout=.1)['ready'])
+            for value in (0,10,True,'4'):
+                with self.assertRaises(ValueError):service.configure(expected_slot=value)
+        finally:service.close()
