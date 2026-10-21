@@ -162,7 +162,9 @@ def main():
                 with_raw=RawMailbox(out/'live_bgr.bin',write=True)
                 try:
                     with_raw.publish(np.zeros((100,200,3),dtype=np.uint8),cv2,17,time.time())
-                    app._display_tick()
+                    deadline=time.monotonic()+3
+                    while app.raw_preview_sequence!=1 and time.monotonic()<deadline:
+                        app._display_tick();app.update();time.sleep(.01)
                     assert app.raw_preview_sequence==1
                     assert 'Direct card BGR' in app.display_metrics.get()
                 finally:

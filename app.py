@@ -21,6 +21,66 @@ PROJECT=Path(__file__).resolve().parent
 SETTINGS=PROJECT/'app_settings.json'
 
 
+class PreviewWorker:
+    """Prepare only the newest frame off Tk's thread; no growing frame queue."""
+    def __init__(self,path):
+        self.path=path;self.size=(1280,720);self.latest=None;self.error=None
+        self.lock=threading.Lock();self.stop=threading.Event()
+        self.thread=threading.Thread(target=self._run,daemon=True);self.thread.start()
+
+    def _run(self):
+        from PIL import Image
+        mailbox=None;sequence=0
+        try:
+            while not self.stop.is_set() and mailbox is None:
+                try:mailbox=RawMailbox(self.path)
+                except (OSError,ValueError):self.stop.wait(.01)
+            while not self.stop.is_set():
+                sample=mailbox.read(sequence)
+                if not sample:self.stop.wait(.002);continue
+                started=time.perf_counter()
+                image=Image.frombytes('RGB',(sample['width'],sample['height']),sample['bgr'],'raw','BGR')
+                with self.lock:size=self.size
+                image.thumbnail(size,Image.Resampling.BILINEAR)
+                value=dict(image=image,sequence=sample['sequence'],timestamp=sample['timestamp'],
+                           prepare_ms=(time.perf_counter()-started)*1000)
+                sequence=sample['sequence']
+                with self.lock:self.latest=value
+        except (OSError,ValueError) as exc:self.error=str(exc)
+        finally:
+            if mailbox:mailbox.close()
+
+    def read(self,after,size):
+        with self.lock:
+            self.size=size
+            return self.latest if self.latest and self.latest['sequence']>after else None
+
+    def close(self):
+        self.stop.set();self.thread.join(timeout=.25)
+
+
+def inspect_gtuner_python(executable):
+    """Probe the chosen interpreter, not the app's interpreter or Gtuner itself."""
+    script = r"""
+import sys,struct,json,pathlib
+result=dict(executable=sys.executable,version=sys.version.split()[0],bits=struct.calcsize('P')*8,
+            prefix=sys.prefix,base_prefix=sys.base_prefix)
+root=pathlib.Path(sys.base_prefix)
+result['python_libraries']=[str(p) for p in root.glob('python3*.dll')]
+try:
+ import cv2
+ result.update(opencv=cv2.__version__,opencv_file=cv2.__file__)
+ result['opencv_binaries']=[str(p) for p in pathlib.Path(cv2.__file__).parent.rglob('*.pyd')]
+except Exception as exc:result['opencv_error']=str(exc)
+print(json.dumps(result))
+"""
+    completed=subprocess.run([str(executable),'-c',script],capture_output=True,text=True,timeout=12)
+    if completed.returncode:raise RuntimeError((completed.stderr or 'Python check failed')[-2000:])
+    result=json.loads(completed.stdout.strip().splitlines()[-1])
+    result['gtuner_embedded_verified']=False
+    return result
+
+
 def capture_worker(cmd,project):
     """Request a bounded scheduling boost, falling back only on access denial."""
     flags=getattr(subprocess,'ABOVE_NORMAL_PRIORITY_CLASS',0) if sys.platform=='win32' else 0
@@ -143,6 +203,8 @@ class Desktop(tk.Tk):
         self.controller=tk.StringVar(value=saved.get('controller','Xbox / GameSir'))
         self.bridge_enabled=tk.BooleanVar(value=saved.get('bridge_enabled',False))
         self.gtuner_path=tk.StringVar(value=saved.get('gtuner_path',''))
+        self.gtuner_python=tk.StringVar(value=saved.get('gtuner_python',''))
+        self.gtuner_python_status=tk.StringVar(value='Choose the Python installation used in Gtuner Preferences → Computer Vision.')
         self.auto_gtuner=tk.BooleanVar(value=saved.get('auto_gtuner',True))
         self.titan_slot=tk.StringVar(value=saved.get('titan_slot','Auto (meter bridge)'))
         self.auto_slot=tk.BooleanVar(value=saved.get('auto_slot',True))
@@ -404,6 +466,13 @@ class Desktop(tk.Tk):
         ttk.Button(row,text='Browse',command=self._browse_gtuner).pack(side='left')
         ttk.Checkbutton(launcher,text='Open Gtuner on app startup when Titan bridge is enabled',
             variable=self.auto_gtuner,command=self._save).pack(anchor='w',pady=5)
+        python_row=ttk.Frame(launcher);python_row.pack(fill='x',pady=8)
+        ttk.Label(python_row,text='Gtuner CV Python').pack(side='left',padx=(0,8))
+        ttk.Entry(python_row,textvariable=self.gtuner_python).pack(side='left',fill='x',expand=True)
+        ttk.Button(python_row,text='Browse',command=self._choose_gtuner_python).pack(side='left',padx=6)
+        ttk.Button(python_row,text='Check CV Python',command=self._check_gtuner_python).pack(side='left')
+        ttk.Label(launcher,textvariable=self.gtuner_python_status,wraplength=850).pack(anchor='w',pady=5)
+        ttk.Label(launcher,text='Use this installation’s folder in Gtuner Preferences → Computer Vision. Confirm its library and OpenCV checks, then run gtuner_meter.py with Null Video Input. CUDA detection stays in the app environment.',style='Muted.TLabel',wraplength=850).pack(anchor='w',pady=5)
         slot_controls=ttk.Frame(slots_page);slot_controls.pack(fill='x',pady=6)
         ttk.Label(slot_controls,text='Default / selected slot').pack(side='left')
         slot_menu=ttk.Combobox(slot_controls,textvariable=self.titan_slot,values=('Auto (meter bridge)',*tuple(str(i) for i in range(1,10))),
@@ -779,6 +848,21 @@ class Desktop(tk.Tk):
             messagebox.showerror("Environment missing","Choose an existing Python executable first.");return None
         return str(executable)
 
+    def _choose_gtuner_python(self):
+        chosen=filedialog.askopenfilename(parent=self,title='Choose Gtuner CV Python executable',filetypes=[('Python','python.exe'),('All files','*.*')])
+        if chosen:self.gtuner_python.set(chosen);self._save()
+
+    def _check_gtuner_python(self):
+        executable=self.gtuner_python.get()
+        if not Path(executable).is_file():
+            self.gtuner_python_status.set('Choose an existing Python executable first.');return
+        if getattr(self,'checking_gtuner_python',False):return
+        self.checking_gtuner_python=True;self.gtuner_python_status.set('Checking Python and OpenCV in the selected installation…')
+        def check():
+            try:self.messages.put(('gtuner_python_checked',inspect_gtuner_python(executable)))
+            except Exception as exc:self.messages.put(('gtuner_python_checked',dict(error=str(exc))))
+        threading.Thread(target=check,daemon=True).start()
+
     def _choose_model(self):
         if self._busy():return
         initial=Path(self.model.get()).parent if Path(self.model.get()).is_file() else Path.home()/'Downloads'
@@ -835,7 +919,7 @@ class Desktop(tk.Tk):
             width=self.width.get(),height=self.height.get(),fps=self.fps.get(),
             imgsz=self.imgsz.get(),seconds=self.seconds.get(),environment=self.environment.get(),
             compute=self.compute.get(),controller=self.controller.get(),bridge_enabled=self.bridge_enabled.get(),
-            gtuner_path=self.gtuner_path.get(),auto_gtuner=self.auto_gtuner.get(),
+            gtuner_python=self.gtuner_python.get(),gtuner_path=self.gtuner_path.get(),auto_gtuner=self.auto_gtuner.get(),
             titan_slot=self.titan_slot.get(),auto_slot=self.auto_slot.get(),
             capture_type=self.capture_type.get(),render_mode=self.render_mode.get(),display_fps=self.display_fps.get(),
             green=dict(green,armed=False)),indent=2),encoding='utf-8')
@@ -1068,9 +1152,23 @@ class Desktop(tk.Tk):
 
     def _poll(self):
         try:
-            while True:
+            # Bound log/worker bursts so Tk can continue rendering and accepting input.
+            for _ in range(64):
                 kind,value=self.messages.get_nowait()
                 if kind=='text':self._log(value)
+                elif kind=='gtuner_python_checked':
+                    self.checking_gtuner_python=False
+                    if value.get('error'):self.gtuner_python_status.set(value['error'])
+                    else:
+                        summary=f"Python {value['version']} / {value['bits']}-bit | OpenCV {value.get('opencv','MISSING')}"
+                        if value.get('opencv_error'):summary+=' | '+value['opencv_error']
+                        if not value.get('python_libraries'):summary+=' | Python DLL not found in base installation'
+                        if value.get('bits')!=64:summary+=' | Match Python architecture to your Gtuner build'
+                        self.gtuner_python_status.set(summary+' | Gtuner embedded compatibility still requires its own checks.')
+                    try:
+                        root=PROJECT/'test_results';root.mkdir(exist_ok=True)
+                        (root/'gtuner_python_check.json').write_text(json.dumps(value,indent=2),encoding='utf-8')
+                    except OSError:pass
                 elif kind=='models_found':
                     self.finding_models=False
                     self.known_models.extend(value);self._refresh_choices();self._save()
@@ -1188,7 +1286,9 @@ class Desktop(tk.Tk):
         if self.bridge_service is None or time.monotonic()-self.bridge_tick_at<.5:return
         self.bridge_tick_at=time.monotonic();value=self.bridge_service.status()
         self._show_slots(None,value.get('active_slot') if value['ready'] else None)
-        self.bridge_status.set(('Bridge disabled • ' if not self.bridge_enabled.get() else '')+value['stage'])
+        summary=('Bridge disabled • ' if not self.bridge_enabled.get() else '')+value['stage']
+        if value.get('rtt_ms') is not None:summary+=f" | CV acknowledgments {value.get('acknowledged',0)} | RTT {value['rtt_ms']:.1f} ms"
+        self.bridge_status.set(summary)
         if value['ready']:self.bridge_seen_ready=True
         elif self.bridge_seen_ready and self.bridge_enabled.get() and not self.pending_reconnect:
             self.trigger_armed.set(False);self._apply_green()
@@ -1227,6 +1327,16 @@ class Desktop(tk.Tk):
     def _close_raw_preview(self):
         if self.raw_preview is not None:
             self.raw_preview.close();self.raw_preview=None
+        samples=getattr(self,'preview_timings',[])
+        out=getattr(self,'capture_out',None)
+        if samples and out:
+            summary={}
+            for key in ('prepare_ms','tk_upload_ms','frame_age_ms'):
+                values=sorted(sample[key] for sample in samples)
+                summary[key]=dict(p50=values[len(values)//2],p95=values[int(.95*(len(values)-1))],maximum=values[-1])
+            try:(out/'preview_timing.json').write_text(json.dumps(dict(samples=len(samples),last_window_only=True,stages=summary),indent=2))
+            except OSError:pass
+        self.preview_timings=[]
         self.raw_preview_sequence=0
         self.raw_preview_photo_size=None
         self.last_display_timestamp=None
@@ -1238,25 +1348,31 @@ class Desktop(tk.Tk):
             display_out=self.capture_out if self.capture_active else self.active_out if self.live_active else None
             if display_out and self.preview.get():
                 if self.raw_preview is None and (display_out/'live_bgr.bin').exists():
-                    self.raw_preview=RawMailbox(display_out/'live_bgr.bin')
-                sample=self.raw_preview.read(self.raw_preview_sequence) if self.raw_preview else None
+                    self.raw_preview=PreviewWorker(display_out/'live_bgr.bin')
+                size=(max(1,self.screen.winfo_width()),max(1,self.screen.winfo_height()))
+                sample=self.raw_preview.read(self.raw_preview_sequence,size) if self.raw_preview else None
                 if sample:
-                    from PIL import Image,ImageTk
-                    image=Image.frombytes('RGB',(sample['width'],sample['height']),sample['bgr'],'raw','BGR')
-                    image.thumbnail((max(1,self.screen.winfo_width()),max(1,self.screen.winfo_height())))
+                    from PIL import ImageTk
+                    image=sample['image'];upload_start=time.perf_counter()
                     if self.raw_preview_photo_size==image.size and hasattr(self.preview_image,'paste'):
                         self.preview_image.paste(image)
                     else:
                         self.preview_image=ImageTk.PhotoImage(image)
                         self.raw_preview_photo_size=image.size
                         self.screen.configure(image=self.preview_image,text='')
+                    self.preview_upload_ms=(time.perf_counter()-upload_start)*1000
+                    self.preview_prepare_ms=sample['prepare_ms']
                     self.raw_preview_sequence=sample['sequence'];self.display_count+=1
                     self.last_display_timestamp=sample['timestamp']
+                    if not hasattr(self,'preview_timings'):self.preview_timings=[]
+                    self.preview_timings.append(dict(prepare_ms=self.preview_prepare_ms,tk_upload_ms=self.preview_upload_ms,
+                        frame_age_ms=max(0,time.time()-sample['timestamp'])*1000))
+                    if len(self.preview_timings)>600:del self.preview_timings[:-600]
                 if self.last_display_timestamp is not None and time.perf_counter()-self.last_display_metric>=.1:
                     self.last_display_metric=time.perf_counter()
                     elapsed=max(.001,time.perf_counter()-self.display_started)
                     age=max(0,time.time()-self.last_display_timestamp)
-                    self.display_metrics.set(f"Direct card BGR | rendered {self.display_count/elapsed:.1f} FPS / limit {self.display_fps.get()} | frame age {age*1000:.0f} ms"+(' • STALE' if age>.5 else ''))
+                    self.display_metrics.set(f"Direct card BGR | rendered {self.display_count/elapsed:.1f} FPS / limit {self.display_fps.get()} | frame age {age*1000:.0f} ms | prep {getattr(self,'preview_prepare_ms',0):.1f} ms | Tk upload {getattr(self,'preview_upload_ms',0):.1f} ms"+(' • STALE' if age>.5 else ''))
         except (OSError,ValueError,tk.TclError):pass
         try:fps=int(self.display_fps.get())
         except ValueError:fps=60
