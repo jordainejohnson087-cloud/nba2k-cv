@@ -30,7 +30,7 @@ jobs:
               raise SystemExit('Tag must equal v plus app_version.json version')
           PY
           python scripts/build_release.py --repository "$REPOSITORY" --out NBA2K_CV_Update.zip
-          python testing/make_update_manifest.py --archive NBA2K_CV_Update.zip --download-url "https://github.com/$REPOSITORY/releases/latest/download/NBA2K_CV_Update.zip" --out update.json
+          python testing/make_update_manifest.py --archive NBA2K_CV_Update.zip --download-url "https://github.com/$REPOSITORY/releases/download/$RELEASE_TAG/NBA2K_CV_Update.zip" --out update.json
           python - <<'PY'
           import json, zipfile
           from pathlib import Path
