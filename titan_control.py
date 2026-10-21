@@ -195,3 +195,92 @@ def launch_gtuner_background(executable,folder):
     subprocess.Popen([str(executable),str(folder/'titan_meter.gpc'),str(folder/'gtuner_meter.py')],
                      cwd=Path(executable).parent,startupinfo=startup)
     return True
+
+
+# Titan Two's documented normal/bootloader product IDs. Presence is not a
+# verified console connection or permission to overwrite a memory slot.
+TITAN_USB_IDS={'0032':'normal','8032':'bootloader'}
+
+
+def _present_usb_nodes():
+    """Read present Windows USB devnodes without opening a HID/device handle."""
+    import ctypes as c
+    from ctypes import wintypes as w
+    class GUID(c.Structure):
+        _fields_=[('Data1',c.c_uint32),('Data2',c.c_uint16),('Data3',c.c_uint16),('Data4',c.c_ubyte*8)]
+    class DEVINFO(c.Structure):
+        _fields_=[('cbSize',c.c_uint32),('ClassGuid',GUID),('DevInst',c.c_uint32),('Reserved',c.c_size_t)]
+    setup=c.WinDLL('setupapi',use_last_error=True)
+    cfg=c.WinDLL('cfgmgr32',use_last_error=True)
+    setup.SetupDiGetClassDevsW.argtypes=[c.c_void_p,w.LPCWSTR,w.HWND,w.DWORD]
+    setup.SetupDiGetClassDevsW.restype=w.HANDLE
+    setup.SetupDiEnumDeviceInfo.argtypes=[w.HANDLE,w.DWORD,c.POINTER(DEVINFO)]
+    setup.SetupDiEnumDeviceInfo.restype=w.BOOL
+    setup.SetupDiGetDeviceInstanceIdW.argtypes=[w.HANDLE,c.POINTER(DEVINFO),w.LPWSTR,w.DWORD,c.POINTER(w.DWORD)]
+    setup.SetupDiGetDeviceInstanceIdW.restype=w.BOOL
+    setup.SetupDiDestroyDeviceInfoList.argtypes=[w.HANDLE]
+    setup.SetupDiDestroyDeviceInfoList.restype=w.BOOL
+    cfg.CM_Get_DevNode_Status.argtypes=[c.POINTER(w.ULONG),c.POINTER(w.ULONG),w.ULONG,w.ULONG]
+    cfg.CM_Get_DevNode_Status.restype=w.ULONG
+    handle=setup.SetupDiGetClassDevsW(None,'USB',None,0x02|0x04)  # PRESENT | ALLCLASSES
+    if handle==c.c_void_p(-1).value:raise c.WinError(c.get_last_error())
+    rows=[]
+    try:
+        index=0
+        while True:
+            info=DEVINFO();info.cbSize=c.sizeof(info)
+            if not setup.SetupDiEnumDeviceInfo(handle,index,c.byref(info)):
+                error=c.get_last_error()
+                if error==259:break  # ERROR_NO_MORE_ITEMS
+                raise c.WinError(error)
+            index+=1
+            instance=c.create_unicode_buffer(4096);needed=w.DWORD()
+            if not setup.SetupDiGetDeviceInstanceIdW(handle,c.byref(info),instance,len(instance),c.byref(needed)):
+                raise c.WinError(c.get_last_error())
+            if not re.match(r'^USB\\VID_2508&PID_(0032|8032)(?=[&\\])',instance.value,re.I):continue
+            flags=w.ULONG();problem=w.ULONG()
+            result=cfg.CM_Get_DevNode_Status(c.byref(flags),c.byref(problem),info.DevInst,0)
+            rows.append(dict(instance_id=instance.value,present=True,
+                problem_code=(int(problem.value) if flags.value&0x400 else 0) if result==0 else None,
+                started=bool(flags.value&0x08) if result==0 else None))
+    finally:setup.SetupDiDestroyDeviceInfoList(handle)
+    return rows
+
+
+def titan_hardware_inventory(rows=None):
+    """Only live USB roots count; serials/instance paths never leave the parser."""
+    import hashlib
+    if rows is None:
+        if sys.platform!='win32':
+            return dict(state='unsupported',devices=[],auto_connect=False,
+                        message='USB hardware discovery requires Windows; bridge status is separate.')
+        try:rows=_present_usb_nodes()
+        except (OSError,ImportError) as exc:
+            return dict(state='unavailable',devices=[],auto_connect=False,
+                        message='Windows USB discovery failed: '+str(exc))
+    devices={}
+    for row in rows:
+        instance=str(row.get('instance_id','')).upper()
+        match=re.match(r'^USB\\VID_2508&PID_(0032|8032)(?=[&\\])',instance)
+        # Ignore composite interfaces: their parent already represents the unit.
+        parts=instance.split('\\')
+        if not match or row.get('present') is not True or len(parts)!=3 or '&MI_' in parts[1]:continue
+        key=hashlib.sha256(instance.encode()).hexdigest()[:16]
+        problem=row.get('problem_code')
+        if type(problem) is not int or problem<0:problem=None
+        devices[key]=dict(id=key,usb_id='2508:'+match[1],mode=TITAN_USB_IDS[match[1]],
+                          problem_code=problem,started=row.get('started') is True)
+    devices=sorted(devices.values(),key=lambda d:d['id'])
+    if not devices:
+        state='missing';message='Titan Two not found by Windows. Connect PROG with a USB data cable; try a direct PC USB port.'
+    elif len(devices)>1:
+        state='multiple';message='Multiple Titan Two devices found. Keep one connected before automatic setup; no device or slot will be guessed.'
+    elif devices[0]['mode']=='bootloader':
+        state='bootloader';message='Titan Two detected in bootloader mode. Complete firmware recovery in Gtuner IV before connecting the app bridge.'
+    elif devices[0]['problem_code'] not in (0,None):
+        state='driver_problem';message=f"Titan Two detected; Windows reports device problem {devices[0]['problem_code']}. Check Device Manager and Windows driver installation."
+    elif devices[0]['problem_code'] is None or not devices[0]['started']:
+        state='not_started';message='Titan Two is present, but Windows has not confirmed its driver started. Wait for device setup or check Device Manager.'
+    else:
+        state='available';message='Titan Two USB detected; Windows device started. GPC echo and console output still require separate checks.'
+    return dict(state=state,devices=devices,auto_connect=state=='available',message=message)

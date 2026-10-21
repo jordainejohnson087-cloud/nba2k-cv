@@ -14,7 +14,7 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 from app_update import (apply_update, configured_feed, current_version,
                         download_release, fetch_manifest, newest_download)
 from app_model import import_model, managed_model, model_catalog
-from run_live import green_config, RawMailbox, GtunerController, slot_number, choose_meter_slot, discover_gtuner, valid_gtuner_path, launch_gtuner_background, BridgeService
+from run_live import green_config, RawMailbox, GtunerController, slot_number, choose_meter_slot, discover_gtuner, valid_gtuner_path, launch_gtuner_background, BridgeService, titan_hardware_inventory
 
 
 PROJECT=Path(__file__).resolve().parent
@@ -71,6 +71,11 @@ class Desktop(tk.Tk):
         self.capture_out=None
         self.bridge_service=None
         self.bridge_tick_at=0
+        self.hardware_scan_pending=False
+        self.hardware_scan_after=None
+        self.hardware_inventory={}
+        self.hardware_autoconnect_id=None
+        self.hardware_closing=False
         self.active_out=None
         self.live_active=False
         self.preview_image=None
@@ -128,6 +133,7 @@ class Desktop(tk.Tk):
         self.titan_slot=tk.StringVar(value=saved.get('titan_slot','Auto (meter bridge)'))
         self.auto_slot=tk.BooleanVar(value=saved.get('auto_slot',True))
         self.bridge_setup_status=tk.StringVar(value='Not checked — install the script in Gtuner once')
+        self.titan_usb_status=tk.StringVar(value='Checking Windows for Titan Two USB hardware...')
         self.bridge_status=tk.StringVar(value='Bridge off • Titan Two hardware not verified')
         self.live_metrics=tk.StringVar(value='Preview idle')
         try:green=green_config(saved.get('green',{}))
@@ -154,6 +160,7 @@ class Desktop(tk.Tk):
         self.after(10,self._display_tick)
         self.after(500,lambda:self._check_online(silent=True))
         self.after(1000,self._startup_bridge)
+        self.after(250,self._scan_titan_hardware)
         self.after(300000,self._periodic_update_check)
         self.protocol('WM_DELETE_WINDOW',self._close)
 
@@ -354,6 +361,8 @@ class Desktop(tk.Tk):
             wraplength=960,justify='left').pack(anchor='w',pady=10)
         launcher=ttk.LabelFrame(bridge_body,text='Startup and bridge readiness',padding=10)
         launcher.pack(fill='x',pady=6)
+        ttk.Label(launcher,textvariable=self.titan_usb_status,wraplength=940).pack(anchor='w',pady=5)
+        ttk.Button(launcher,text='Rescan Titan USB',command=self._scan_titan_hardware).pack(anchor='w',pady=4)
         row=ttk.Frame(launcher);row.pack(fill='x')
         ttk.Label(row,text='Gtuner IV executable').pack(side='left',padx=(0,8))
         ttk.Entry(row,textvariable=self.gtuner_path).pack(side='left',fill='x',expand=True)
@@ -462,6 +471,37 @@ class Desktop(tk.Tk):
         if chosen:
             self.gtuner_path.set(chosen);self.gtuner_launched=False;self._save()
 
+    def _scan_titan_hardware(self):
+        if self.hardware_scan_pending or self.hardware_closing:return
+        if self.hardware_scan_after:
+            self.after_cancel(self.hardware_scan_after);self.hardware_scan_after=None
+        self.hardware_scan_pending=True
+        def work():
+            try:value=titan_hardware_inventory()
+            except Exception as exc:value=dict(state='unavailable',devices=[],auto_connect=False,message='USB discovery failed: '+str(exc))
+            self.messages.put(('titan_hardware',value))
+        threading.Thread(target=work,daemon=True).start()
+
+    def _handle_titan_hardware(self,value):
+        self.hardware_scan_pending=False
+        self.hardware_inventory=value
+        self.titan_usb_status.set(value['message'])
+        try:
+            path=PROJECT/'test_results'/'titan_hardware.json';path.parent.mkdir(exist_ok=True)
+            path.write_text(json.dumps(dict(timestamp=time.time(),**value),indent=2))
+        except OSError:pass
+        if value.get('auto_connect'):
+            key=value['devices'][0]['id']
+            if (self.bridge_enabled.get() and not self.preparing_bridge
+                    and self.hardware_autoconnect_id!=key):
+                self.hardware_autoconnect_id=key
+                self._connect_bridge()
+        elif value.get('state') not in ('unavailable','unsupported'):
+            self.hardware_autoconnect_id=None
+            self.trigger_armed.set(False);self._apply_green()
+            if self.bridge_service:self.bridge_service.allow_output(False);self.bridge_service.clear()
+        if not self.hardware_closing:self.hardware_scan_after=self.after(3000,self._scan_titan_hardware)
+
     def _startup_bridge(self):
         if self.bridge_enabled.get():self._prepare_bridge()
         else:self._find_gtuner()
@@ -500,6 +540,8 @@ class Desktop(tk.Tk):
         self.gtuner_launched=True
 
     def _connect_bridge(self):
+        inventory=getattr(self,'hardware_inventory',{})
+        if inventory.get('auto_connect'):self.hardware_autoconnect_id=inventory['devices'][0]['id']
         self.bridge_enabled.set(True);self.trigger_armed.set(False)
         self._apply_green()
         if self.bridge_service:self.bridge_service.configure(enabled=True)
@@ -533,6 +575,9 @@ class Desktop(tk.Tk):
         if self._busy(allow_capture=True,allow_detection=True):return
         if self.bridge_service is None:
             self.bridge_setup_status.set('Local bridge service is unavailable. Capture and AI remain usable.');return
+        inventory=getattr(self,'hardware_inventory',{})
+        if inventory.get('state') in ('missing','bootloader','multiple','driver_problem','not_started'):
+            self.bridge_setup_status.set(inventory['message']);return
         try:selected=None if self.titan_slot.get()=='Auto (meter bridge)' else slot_number(self.titan_slot.get())
         except ValueError as exc:self.bridge_setup_status.set(str(exc));return
         self.trigger_armed.set(False);self._apply_green()
@@ -970,6 +1015,8 @@ class Desktop(tk.Tk):
                             self._prepare_bridge(**(prepare_args or {}))
                     else:
                         self.bridge_setup_status.set('Gtuner IV not found. Install/extract Gtuner IV, then Find Gtuner or Browse.'+(' '+error if error else ''))
+                elif kind=='titan_hardware':
+                    self._handle_titan_hardware(value)
                 elif kind=='bridge_prepared':
                     self.preparing_bridge=False
                     capture,result,error,slots=value
@@ -1301,6 +1348,7 @@ class Desktop(tk.Tk):
         else:self.destroy()
 
     def destroy(self):
+        self.hardware_closing=True
         self.capture_handoff_pending=False
         if getattr(self,'capture_active',False) and self.capture_out:
             (self.capture_out/'capture_stop.request').touch()

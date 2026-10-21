@@ -153,3 +153,75 @@ class CapturePriorityTests(unittest.TestCase):
             process.terminate.assert_called_once();app._stop_capture.assert_called_once()
             self.assertEqual(app.after.call_args.args[0],2000)
             self.assertTrue(app.capture_watchdog_fired)
+
+
+class TitanHardwareDiscoveryTests(unittest.TestCase):
+    def node(self,pid='0032',serial='unit-one',**changes):
+        return dict(instance_id='USB\\VID_2508&PID_'+pid+'\\'+serial,
+                    present=True,problem_code=0,started=True,**changes)
+
+    def test_present_only_ids_and_composite_deduplication(self):
+        from titan_control import titan_hardware_inventory
+        rows=[self.node(),self.node(),dict(self.node(),instance_id='USB\\VID_2508&PID_0032&MI_00\\interface'),
+              dict(self.node(serial='old'),present=False),self.node(pid='0001'),
+              dict(self.node(),instance_id='USB\\VID_2508&PID_00320\\fake')]
+        value=titan_hardware_inventory(rows)
+        self.assertEqual(value['state'],'available');self.assertTrue(value['auto_connect'])
+        self.assertEqual(len(value['devices']),1)
+        self.assertNotIn('unit-one',str(value));self.assertNotIn('instance_id',str(value))
+
+    def test_bootloader_driver_problems_and_multiple_units_are_not_auto_connected(self):
+        from titan_control import titan_hardware_inventory
+        for rows,state in [([self.node(pid='8032')],'bootloader'),
+                           ([dict(self.node(),problem_code=28)],'driver_problem'),
+                           ([dict(self.node(),problem_code=None)],'not_started'),
+                           ([dict(self.node(),started=False)],'not_started'),
+                           ([self.node(),self.node(serial='two')],'multiple'),([], 'missing')]:
+            with self.subTest(state=state):
+                result=titan_hardware_inventory(rows)
+                self.assertEqual(result['state'],state);self.assertFalse(result['auto_connect'])
+
+    def test_windows_scan_failure_stays_unknown_instead_of_missing(self):
+        from titan_control import titan_hardware_inventory
+        with patch('titan_control.sys.platform','win32'),patch('titan_control._present_usb_nodes',side_effect=OSError('denied')):
+            value=titan_hardware_inventory()
+        self.assertEqual(value['state'],'unavailable');self.assertFalse(value['auto_connect'])
+
+    def test_hotplug_reconnects_once_then_disarms_on_removal(self):
+        from app import Desktop
+        from types import SimpleNamespace
+        from pathlib import Path
+        import tempfile
+        app=SimpleNamespace(hardware_scan_pending=False,hardware_inventory={},titan_usb_status=Mock(),
+            bridge_enabled=Mock(),preparing_bridge=False,pending_reconnect=True,hardware_autoconnect_id=None,
+            _connect_bridge=Mock(),trigger_armed=Mock(),_apply_green=Mock(),bridge_service=Mock(),
+            hardware_closing=False,after=Mock(),_scan_titan_hardware=Mock())
+        app.bridge_enabled.get.return_value=True
+        value=dict(state='available',auto_connect=True,devices=[dict(id='one')],message='Detected')
+        with tempfile.TemporaryDirectory() as folder,patch('app.PROJECT',Path(folder)):
+            Desktop._handle_titan_hardware(app,value)
+            Desktop._handle_titan_hardware(app,value)
+            self.assertEqual(app._connect_bridge.call_count,1)
+            Desktop._handle_titan_hardware(app,dict(state='missing',auto_connect=False,devices=[],message='Not detected'))
+            app.trigger_armed.set.assert_called_with(False)
+            app.bridge_service.allow_output.assert_called_with(False)
+            Desktop._handle_titan_hardware(app,value)
+            self.assertEqual(app._connect_bridge.call_count,2)
+
+    @unittest.skipUnless(__import__('sys').platform=='win32','Native Windows USB enumeration')
+    def test_native_present_device_enumeration_does_not_require_titan_hardware(self):
+        from titan_control import titan_hardware_inventory
+        value=titan_hardware_inventory()
+        self.assertNotEqual(value['state'],'unavailable',value['message'])
+        self.assertIsInstance(value['devices'],list)
+
+    def test_missing_usb_stops_setup_before_opening_a_gtuner_window(self):
+        from app import Desktop
+        from types import SimpleNamespace
+        app=SimpleNamespace(_busy=Mock(return_value=False),bridge_service=Mock(),
+            hardware_inventory=dict(state='missing',message='Connect PROG with a data cable'),
+            bridge_setup_status=Mock())
+        with patch('app.discover_gtuner') as discover:
+            Desktop._prepare_bridge(app)
+            discover.assert_not_called()
+        app.bridge_setup_status.set.assert_called_once_with('Connect PROG with a data cable')

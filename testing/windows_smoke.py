@@ -31,6 +31,7 @@ def main():
     with ExitStack() as stack:
         stack.enter_context(patch.object(Desktop, '_check_online'))
         stack.enter_context(patch.object(Desktop, '_startup_bridge'))
+        stack.enter_context(patch.object(Desktop, '_scan_titan_hardware'))
         for name in ('showerror','showinfo','showwarning','askyesno'):
             stack.enter_context(patch('app.messagebox.'+name,side_effect=unexpected_dialog))
         app = Desktop()
