@@ -62,7 +62,7 @@ class PreviewWorker:
 def inspect_gtuner_python(executable):
     """Probe the chosen interpreter, not the app's interpreter or Gtuner itself."""
     script = r"""
-import sys,struct,json,pathlib
+import sys,struct,json,pathlib,importlib
 result=dict(executable=sys.executable,version=sys.version.split()[0],bits=struct.calcsize('P')*8,
             prefix=sys.prefix,base_prefix=sys.base_prefix)
 root=pathlib.Path(sys.base_prefix)
@@ -72,6 +72,11 @@ try:
  result.update(opencv=cv2.__version__,opencv_file=cv2.__file__)
  result['opencv_binaries']=[str(p) for p in pathlib.Path(cv2.__file__).parent.rglob('*.pyd')]
 except Exception as exc:result['opencv_error']=str(exc)
+result['pywin32']={}
+for name in ('win32api','pywintypes','pythoncom'):
+ try:
+  module=importlib.import_module(name);result['pywin32'][name]=dict(ok=True,path=module.__file__)
+ except Exception as exc:result['pywin32'][name]=dict(ok=False,error=str(exc))
 print(json.dumps(result))
 """
     completed=subprocess.run([str(executable),'-c',script],capture_output=True,text=True,timeout=12)
@@ -79,6 +84,22 @@ print(json.dumps(result))
     result=json.loads(completed.stdout.strip().splitlines()[-1])
     result['gtuner_embedded_verified']=False
     return result
+
+
+def prepare_gtuner_runtime(app_python):
+    """Provision only CV/Win32 in the full 3.11 base used by the managed app."""
+    probe=subprocess.run([str(app_python),'-c',
+        "import sys,struct,pathlib,json; assert sys.version_info[:2]==(3,11) and struct.calcsize('P')==8, 'Python 3.11 x64 required'; print(json.dumps(str(pathlib.Path(sys.base_prefix)/'python.exe')))"],
+        capture_output=True,text=True,timeout=12)
+    if probe.returncode:raise RuntimeError(probe.stderr[-2000:] or 'Python 3.11 x64 required')
+    executable=json.loads(probe.stdout.strip().splitlines()[-1])
+    result=subprocess.run([executable,'-m','pip','install','--only-binary=:all:',
+        'opencv-python>=4.8,<5','pywin32>=306,<400'],capture_output=True,text=True,timeout=300)
+    if result.returncode:raise RuntimeError((result.stderr or result.stdout)[-3000:])
+    report=inspect_gtuner_python(executable)
+    report['installation_folder']=str(Path(executable).parent)
+    report['app_environment']=str(app_python)
+    return report
 
 
 def capture_worker(cmd,project):
@@ -199,6 +220,7 @@ class Desktop(tk.Tk):
         self.imgsz.trace_add('write',lambda *_:self._input_changed())
         self.seconds=tk.StringVar(value=saved.get('seconds','0'))
         self.environment=tk.StringVar(value=saved.get('environment',sys.executable))
+        if saved.get('app_runtime_generation')!=311 and sys.platform=='win32':self.environment.set(sys.executable)
         self.compute=tk.StringVar(value=saved.get('compute','auto'))
         self.controller=tk.StringVar(value=saved.get('controller','Xbox / GameSir'))
         self.bridge_enabled=tk.BooleanVar(value=saved.get('bridge_enabled',False))
@@ -495,6 +517,7 @@ class Desktop(tk.Tk):
         ttk.Entry(python_row,textvariable=self.gtuner_python).pack(side='left',fill='x',expand=True)
         ttk.Button(python_row,text='Browse',command=self._choose_gtuner_python).pack(side='left',padx=6)
         ttk.Button(python_row,text='Check CV Python',command=self._check_gtuner_python).pack(side='left')
+        ttk.Button(launcher,text='Prepare Gtuner Python 3.11',command=self._prepare_gtuner_python).pack(anchor='w',pady=5)
         ttk.Label(launcher,textvariable=self.gtuner_python_status,wraplength=850).pack(anchor='w',pady=5)
         ttk.Label(launcher,text='Use this installation’s folder in Gtuner Preferences → Computer Vision. Confirm its library and OpenCV checks, then run gtuner_meter.py with Null Video Input. CUDA detection stays in the app environment.',style='Muted.TLabel',wraplength=850).pack(anchor='w',pady=5)
         slot_controls=ttk.Frame(slots_page);slot_controls.pack(fill='x',pady=6)
@@ -857,7 +880,8 @@ class Desktop(tk.Tk):
         self._select_model()
 
     def _refresh_choices(self):
-        candidates=[self.environment.get(),*self.known_environments,sys.executable,
+        candidates=[self.environment.get(),sys.executable,
+            str(PROJECT/'.venv311'/('Scripts/python.exe' if sys.platform=='win32' else 'bin/python')),*self.known_environments,
             str(PROJECT/'.venv'/('Scripts/python.exe' if sys.platform=='win32' else 'bin/python'))]
         self.known_environments=list(dict.fromkeys(p for p in candidates if p))
         self.environment_menu.configure(values=[p for p in self.known_environments if Path(p).is_file()])
@@ -882,6 +906,15 @@ class Desktop(tk.Tk):
     def _choose_gtuner_python(self):
         chosen=filedialog.askopenfilename(parent=self,title='Choose Gtuner CV Python executable',filetypes=[('Python','python.exe'),('All files','*.*')])
         if chosen:self.gtuner_python.set(chosen);self._save()
+
+    def _prepare_gtuner_python(self):
+        if getattr(self,'checking_gtuner_python',False):return
+        self.checking_gtuner_python=True
+        self.gtuner_python_status.set('Preparing OpenCV / PyWin32 in the app’s full Python 3.11 base installation…')
+        def work():
+            try:self.messages.put(('gtuner_python_checked',prepare_gtuner_runtime(sys.executable)))
+            except Exception as exc:self.messages.put(('gtuner_python_checked',dict(error=str(exc))))
+        threading.Thread(target=work,daemon=True).start()
 
     def _check_gtuner_python(self):
         executable=self.gtuner_python.get()
@@ -945,7 +978,7 @@ class Desktop(tk.Tk):
         except ValueError:green=load_settings().get('green',green_config())
         self.known_models=list(dict.fromkeys([self.model.get(),*self.known_models]))
         self.known_environments=list(dict.fromkeys([self.environment.get(),*self.known_environments]))
-        SETTINGS.write_text(json.dumps(dict(model=self.model.get(),known_models=self.known_models,
+        SETTINGS.write_text(json.dumps(dict(app_runtime_generation=311,model=self.model.get(),known_models=self.known_models,
             known_environments=self.known_environments,source=self.source.get(),
             width=self.width.get(),height=self.height.get(),fps=self.fps.get(),
             imgsz=self.imgsz.get(),seconds=self.seconds.get(),environment=self.environment.get(),
@@ -1196,6 +1229,11 @@ class Desktop(tk.Tk):
                     if value.get('error'):self.gtuner_python_status.set(value['error'])
                     else:
                         summary=f"Python {value['version']} / {value['bits']}-bit | OpenCV {value.get('opencv','MISSING')}"
+                        win32=value.get('pywin32',{})
+                        if win32:summary+=' | PyWin32 '+('OK' if all(item.get('ok') for item in win32.values()) else 'MISSING / import failure')
+                        if value.get('installation_folder'):
+                            self.gtuner_python.set(value['executable']);self._save()
+                            summary+=' | Select this folder in Gtuner: '+value['installation_folder']
                         if value.get('opencv_error'):summary+=' | '+value['opencv_error']
                         if not value.get('python_libraries'):summary+=' | Python DLL not found in base installation'
                         if value.get('bits')!=64:summary+=' | Match Python architecture to your Gtuner build'
@@ -1616,10 +1654,13 @@ class Desktop(tk.Tk):
 
 
 def bootstrap_windows_controls():
-    """Old updaters restart app.py directly; finish new dependency setup once."""
+    """Migrate old updater restarts through the managed 3.11 launcher."""
     if sys.platform!='win32':return False
     import importlib.util
-    if any(importlib.util.find_spec(name) is None for name in ('pywinauto','psutil')):
+    import struct
+    managed=PROJECT/'.venv311'/'Scripts'/'python.exe'
+    correct=(sys.version_info[:2]==(3,11) and struct.calcsize('P')==8 and Path(sys.executable).resolve().parent==managed.parent.resolve())
+    if not correct or any(importlib.util.find_spec(name) is None for name in ('cv2','win32api','pywintypes','pythoncom','pywinauto','psutil')):
         subprocess.Popen(['cmd.exe','/c',str(PROJECT/'Launch NBA2K CV.bat')],cwd=PROJECT)
         return True
     return False

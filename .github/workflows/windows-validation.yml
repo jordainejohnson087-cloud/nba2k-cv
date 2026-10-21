@@ -40,7 +40,7 @@ jobs:
           ref: ${{ inputs.ref || github.sha }}
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.14'
+          python-version: '3.11'
       - name: Create app environment
         shell: pwsh
         run: python -m venv .venv

@@ -4,18 +4,24 @@ import importlib
 import json
 import platform
 import sys
+import struct
 from pathlib import Path
 
 
 def check(model, importer=importlib.import_module):
-    result=dict(python=sys.version.split()[0],platform=platform.platform(),
+    result=dict(python=sys.version.split()[0],executable=sys.executable,base_prefix=sys.base_prefix,
+                bits=struct.calcsize('P')*8,platform=platform.platform(),
                 model=str(model),checks={},ready=False)
     checks=result['checks']
+    checks['app_runtime']=dict(ok=sys.platform!='win32' or (sys.version_info[:2]==(3,11) and struct.calcsize('P')==8),
+        message='Windows app runtime requires Python 3.11 x64')
     if not model or not Path(model).is_file():
         checks['model']=dict(ok=False,message='Select an existing best.pt')
     else:
         checks['model']=dict(ok=True,size_bytes=Path(model).stat().st_size)
-    for name in ('cv2','torch','ultralytics'):
+    modules=['cv2','torch','ultralytics','PIL']
+    if sys.platform=='win32':modules+=['win32api','pywintypes','pythoncom']
+    for name in modules:
         try:
             module=importer(name)
             checks[name]=dict(ok=True,version=str(getattr(module,'__version__','unknown')))
@@ -41,7 +47,8 @@ def check(model, importer=importlib.import_module):
         except Exception as exc:
             checks['model_load']=dict(ok=False,message=f'{type(exc).__name__}: {exc}')
     else:checks['model_load']=dict(ok=False,message='Model or Ultralytics unavailable')
-    result['ready']=all(checks[k]['ok'] for k in ('model','cv2','torch','ultralytics','gpu','model_load'))
+    result['ready']=all(checks[k]['ok'] for k in ['app_runtime','model','gpu','model_load',*modules])
+    result['gtuner_embedded_verified']=False
     return result
 
 

@@ -15,10 +15,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 def main():
     if sys.platform != 'win32':
         raise SystemExit('This smoke test must run on Windows')
+    if sys.version_info[:2] != (3,11):
+        raise SystemExit('Windows validation requires Python 3.11')
     if sys.prefix == sys.base_prefix:
         raise SystemExit('The app must run inside its virtual environment')
 
     import cv2
+    import win32api
+    import pywintypes
+    import pythoncom
     import torch
     import ultralytics
     import pywinauto
