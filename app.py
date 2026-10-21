@@ -21,6 +21,19 @@ PROJECT=Path(__file__).resolve().parent
 SETTINGS=PROJECT/'app_settings.json'
 
 
+def capture_worker(cmd,project):
+    """Request a bounded scheduling boost, falling back only on access denial."""
+    flags=getattr(subprocess,'ABOVE_NORMAL_PRIORITY_CLASS',0) if sys.platform=='win32' else 0
+    kwargs=dict(cwd=project,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1)
+    try:
+        process=subprocess.Popen(cmd,creationflags=flags,**kwargs)
+        return process,dict(policy='app-first',requested='above-normal' if flags else 'normal',fallback=False)
+    except PermissionError:
+        if not flags:raise
+        process=subprocess.Popen(cmd,creationflags=0,**kwargs)
+        return process,dict(policy='app-first',requested='normal',fallback=True,reason='OS denied priority request')
+
+
 def load_settings():
     try: return json.loads(SETTINGS.read_text(encoding='utf-8'))
     except (OSError,ValueError): return {}
@@ -287,6 +300,7 @@ class Desktop(tk.Tk):
         display.pack(fill='x');display.bind('<<ComboboxSelected>>',self._display_changed)
         ttk.Label(capture,text='Duration in seconds  •  0 = until Stop',style='CardMuted.TLabel').pack(anchor='w',pady=(7,4))
         ttk.Entry(capture,textvariable=self.seconds,width=10).pack(fill='x')
+        ttk.Label(capture,text='App-first: releases this app’s probe and requests Above Normal CPU priority on Windows. Close other software holding the card; use Null input in Gtuner.',style='CardMuted.TLabel',wraplength=245).pack(anchor='w',pady=(8,0))
         ttk.Checkbutton(capture,text='Show live preview',variable=self.preview,command=self._display_changed).pack(anchor='w',pady=(8,0))
         ttk.Checkbutton(capture,text='Save annotated replay',variable=self.record).pack(anchor='w')
         ttk.Checkbutton(capture,text='Save analyzed training frames',variable=self.raw).pack(anchor='w')
@@ -305,9 +319,9 @@ class Desktop(tk.Tk):
         work.columnconfigure(0,weight=1);work.rowconfigure(2,weight=1)
         actions=ttk.Frame(work);actions.grid(row=0,column=0,sticky='ew',pady=(0,12))
         capture_actions=ttk.Frame(actions);capture_actions.pack(fill='x')
-        ttk.Button(capture_actions,text='▶  Preview Capture',style='Accent.TButton',command=self._start_capture).pack(side='left')
+        ttk.Button(capture_actions,text='▶  Start Capture',style='Accent.TButton',command=self._start_capture).pack(side='left')
         ttk.Button(capture_actions,text='■  Stop Capture',style='Stop.TButton',command=self._stop_capture).pack(side='left',padx=8)
-        ttk.Label(capture_actions,text='Console view • no model required',style='Muted.TLabel').pack(side='left')
+        ttk.Label(capture_actions,text='App-first capture • one card owner',style='Muted.TLabel').pack(side='left')
         ai_actions=ttk.Frame(actions);ai_actions.pack(fill='x',pady=(8,0))
         ttk.Button(ai_actions,text='▶  Start AI Detection',command=self._live).pack(side='left')
         ttk.Button(ai_actions,text='■  Stop AI',command=self._stop).pack(side='left',padx=8)
@@ -349,21 +363,40 @@ class Desktop(tk.Tk):
         self.tabs.add(self.bridge_tab,text='Titan Two')
         bridge_scroll,bridge_body=self._scroll_panel(self.bridge_tab,width=960)
         bridge_scroll.pack(fill='both',expand=True)
-        ttk.Label(bridge_body,text='Titan Two / Gtuner bridge',font=('Segoe UI',14,'bold')).pack(anchor='w',pady=8)
-        ttk.Label(bridge_body,text=(
-            'Connect Titan Two PROG to the PC, OUTPUT to the console, and the controller to INPUT-A.\n'
-            'One-time setup: install titan_meter.gpc to an unused Gtuner memory slot and select it. '
-            'Enable “Recall loaded memory slot between power cycles” in Gtuner Device Configuration.\n'
-            'Start gtuner_meter.py in Gtuner Computer Vision with a Null or separate display source. '
-            'Do not open the same capture card in both apps.\n'
-            'This app opens Gtuner and requests the chosen slot with its documented shortcut. Slot programming still uses Gtuner. '
-            'Before bridged capture, it checks a fresh, unarmed v2 payload echo from the Titan script. '
-            'This proves the bridge round trip, not console action or shot accuracy.'),
-            wraplength=960,justify='left').pack(anchor='w',pady=10)
-        launcher=ttk.LabelFrame(bridge_body,text='Startup and bridge readiness',padding=10)
+        ttk.Label(bridge_body,text='TITAN CONTROL CENTER',font=('Segoe UI',18,'bold')).pack(anchor='w',pady=(4,8))
+        ttk.Label(bridge_body,text='Connect the device → verify the script → start detection',style='Muted.TLabel').pack(anchor='w',pady=(0,12))
+        device=ttk.LabelFrame(bridge_body,text='01   DEVICE & CONNECTION',padding=14)
+        device.pack(fill='x',pady=6)
+        ttk.Label(device,textvariable=self.titan_usb_status,wraplength=880).pack(anchor='w',pady=5)
+        connection=ttk.Frame(device);connection.pack(fill='x',pady=8)
+        ttk.Button(connection,text='Scan USB',command=self._scan_titan_hardware).pack(side='left')
+        ttk.Button(connection,text='Connect / Reconnect',style='Accent.TButton',command=self._connect_bridge).pack(side='left',padx=8)
+        ttk.Button(connection,text='Disconnect App Bridge',command=self._disconnect_bridge).pack(side='left')
+        ttk.Label(device,textvariable=self.bridge_status,wraplength=880).pack(anchor='w',pady=5)
+        ttk.Label(device,textvariable=self.bridge_setup_status,wraplength=880).pack(anchor='w',pady=5)
+        ttk.Label(device,text='Console output: unverified • USB presence and script echo do not confirm console input.',style='Muted.TLabel',wraplength=880).pack(anchor='w')
+        self.bridge_pages=ttk.Notebook(bridge_body)
+        self.bridge_pages.pack(fill='both',expand=True,pady=12)
+        setup_page=ttk.Frame(self.bridge_pages,padding=12)
+        slots_page=ttk.Frame(self.bridge_pages,padding=12)
+        calibration_page=ttk.Frame(self.bridge_pages,padding=12)
+        self.bridge_pages.add(setup_page,text='Setup & runtime')
+        self.bridge_pages.add(slots_page,text='Scripts & slots')
+        self.bridge_pages.add(calibration_page,text='Detection calibration')
+        ttk.Label(setup_page,text='FIRST CONNECTION',font=('Segoe UI',11,'bold')).pack(anchor='w',pady=6)
+        for instruction in (
+            '1. Connect PROG to this PC, OUTPUT to the console, and the controller to INPUT-A.',
+            '2. Open Bridge Files. Install titan_meter.gpc into an unused slot using Gtuner IV.',
+            '3. In Gtuner, enable Recall loaded memory slot between power cycles.',
+            '4. Start gtuner_meter.py in Gtuner Computer Vision with a Null source. Leave the capture card for this app.',
+            '5. Choose the installed slot in Scripts & slots, then Connect / Reconnect. Keep the trigger off until verified.'):
+            ttk.Label(setup_page,text=instruction,wraplength=850,justify='left').pack(anchor='w',pady=5)
+        ttk.Button(setup_page,text='Open matching bridge scripts',command=self._open_bridge).pack(anchor='w',pady=8)
+        ttk.Label(setup_page,text='Controller profile').pack(anchor='w')
+        ttk.Combobox(setup_page,textvariable=self.controller,values=('Xbox / GameSir','Xbox Elite','DualSense','DualShock 4','Generic HID'),state='readonly',width=26).pack(anchor='w',pady=5)
+        ttk.Label(setup_page,text='Profile is shared with Live Detection. Gtuner handles device programming; this app verifies the bridge and requests slots.',style='Muted.TLabel',wraplength=850).pack(anchor='w',pady=5)
+        launcher=ttk.LabelFrame(setup_page,text='Gtuner runtime',padding=10)
         launcher.pack(fill='x',pady=6)
-        ttk.Label(launcher,textvariable=self.titan_usb_status,wraplength=940).pack(anchor='w',pady=5)
-        ttk.Button(launcher,text='Rescan Titan USB',command=self._scan_titan_hardware).pack(anchor='w',pady=4)
         row=ttk.Frame(launcher);row.pack(fill='x')
         ttk.Label(row,text='Gtuner IV executable').pack(side='left',padx=(0,8))
         ttk.Entry(row,textvariable=self.gtuner_path).pack(side='left',fill='x',expand=True)
@@ -371,27 +404,24 @@ class Desktop(tk.Tk):
         ttk.Button(row,text='Browse',command=self._browse_gtuner).pack(side='left')
         ttk.Checkbutton(launcher,text='Open Gtuner on app startup when Titan bridge is enabled',
             variable=self.auto_gtuner,command=self._save).pack(anchor='w',pady=5)
-        slot_controls=ttk.Frame(launcher);slot_controls.pack(fill='x',pady=6)
+        slot_controls=ttk.Frame(slots_page);slot_controls.pack(fill='x',pady=6)
         ttk.Label(slot_controls,text='Default / selected slot').pack(side='left')
         slot_menu=ttk.Combobox(slot_controls,textvariable=self.titan_slot,values=('Auto (meter bridge)',*tuple(str(i) for i in range(1,10))),
             state='readonly',width=20)
         slot_menu.pack(side='left',padx=8)
         slot_menu.bind('<<ComboboxSelected>>',lambda event:self._bridge_slot_changed())
         ttk.Button(slot_controls,text='Switch Slot',command=lambda:self._prepare_bridge(force_slot=True)).pack(side='left')
-        ttk.Checkbutton(launcher,text='Automatically select this slot on startup / reconnect / before capture',
+        ttk.Checkbutton(slots_page,text='Automatically select this slot on startup / reconnect / before capture',
             variable=self.auto_slot,command=self._bridge_slot_changed).pack(anchor='w')
-        connection=ttk.Frame(launcher);connection.pack(fill='x',pady=6)
-        ttk.Button(connection,text='Connect / Reconnect',command=self._connect_bridge).pack(side='left')
-        ttk.Button(connection,text='Disconnect App Bridge',command=self._disconnect_bridge).pack(side='left',padx=8)
-        ttk.Button(connection,text='Refresh Slot Names',command=lambda:self._prepare_bridge(read_only=True)).pack(side='left')
-        self.slot_table=ttk.Treeview(launcher,columns=('name','state'),show='tree headings',height=9)
+        ttk.Button(slots_page,text='Refresh Slot Names',command=lambda:self._prepare_bridge(read_only=True)).pack(anchor='w',pady=8)
+        self.slot_table=ttk.Treeview(slots_page,columns=('name','state'),show='tree headings',height=9)
         self.slot_table.heading('#0',text='Slot');self.slot_table.column('#0',width=70,stretch=False)
         self.slot_table.heading('name',text='Script label read from Gtuner');self.slot_table.column('name',width=400)
         self.slot_table.heading('state',text='Device confirmation');self.slot_table.column('state',width=180)
         self.slot_table.pack(fill='x',pady=6)
         for i in range(1,10):self.slot_table.insert('', 'end',iid=str(i),text=str(i),values=('Unavailable — refresh with Gtuner open','Not verified'))
-        ttk.Label(launcher,textvariable=self.bridge_setup_status,wraplength=940).pack(anchor='w',pady=6)
-        calibration=ttk.LabelFrame(bridge_body,text='Green detection and stick flick',padding=10)
+        ttk.Label(slots_page,text='Script names come from Gtuner. A fresh payload echo must confirm the active slot before output is enabled.',style='Muted.TLabel',wraplength=850).pack(anchor='w',pady=8)
+        calibration=ttk.LabelFrame(calibration_page,text='Green detection and stick flick',padding=10)
         calibration.pack(fill='x',pady=8)
         fields=[('Hue low','hue_low'),('Hue high','hue_high'),('Saturation min','saturation_min'),
             ('Brightness min','value_min'),('Green row fraction','row_coverage'),('Confidence min','min_confidence'),
@@ -408,8 +438,6 @@ class Desktop(tk.Tk):
             variable=self.trigger_armed).grid(row=5,column=0,columnspan=6,sticky='w',pady=6)
         ttk.Button(calibration,text='Apply Detection / Flick Settings',command=self._apply_green).grid(row=6,column=0,columnspan=6,sticky='w')
         ttk.Label(calibration,textvariable=self.green_status,wraplength=950).grid(row=7,column=0,columnspan=6,sticky='w',pady=4)
-        ttk.Label(bridge_body,textvariable=self.bridge_status).pack(anchor='w',pady=10)
-        ttk.Button(bridge_body,text='Open Bridge Files',command=self._open_bridge).pack(anchor='w')
         results=ttk.Frame(self.tabs,padding=14);self.tabs.add(results,text='Results')
         ttk.Button(results,text='Refresh Runs',command=self._refresh).pack(anchor='w')
         self.runs=ttk.Treeview(results,columns=('device','fps','frames'),show='tree headings',height=13)
@@ -904,8 +932,9 @@ class Desktop(tk.Tk):
             '--display-fps',self.display_fps.get(),'--render-mode',self.render_mode.get().lower(),
             '--display-settings',str(out/'display_settings.json')]+self._common((width,height,fps,1280,0))
         try:
-            process=subprocess.Popen(cmd,cwd=PROJECT,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1,
-                creationflags=getattr(subprocess,'ABOVE_NORMAL_PRIORITY_CLASS',0) if sys.platform=='win32' else 0)
+            process,priority=capture_worker(cmd,PROJECT)
+            try:(out/'capture_priority.json').write_text(json.dumps(priority),encoding='utf-8')
+            except OSError:pass
         except OSError as exc:
             messagebox.showerror('Capture failed',str(exc));return
         self._close_raw_preview();self.capture_process=process;self.capture_out=out;self.capture_active=True

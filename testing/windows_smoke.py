@@ -65,6 +65,13 @@ def main():
             screenshot.parent.mkdir(exist_ok=True)
             ImageGrab.grab(bbox=(app.winfo_rootx(),app.winfo_rooty(),
                 app.winfo_rootx()+app.winfo_width(),app.winfo_rooty()+app.winfo_height())).save(screenshot)
+            app.tabs.select(app.bridge_tab);app.update()
+            bridge_names=[app.bridge_pages.tab(i,'text') for i in range(app.bridge_pages.index('end'))]
+            assert bridge_names==['Setup & runtime','Scripts & slots','Detection calibration']
+            assert len(app.slot_table.get_children())==9
+            ImageGrab.grab(bbox=(app.winfo_rootx(),app.winfo_rooty(),
+                app.winfo_rootx()+app.winfo_width(),app.winfo_rooty()+app.winfo_height())).save(screenshot.with_name('ui_titan.png'))
+            app.tabs.select(0);app.update()
             # Check selected runtime, untimed launch and safe Stop without hardware.
             with tempfile.TemporaryDirectory() as folder:
                 out=Path(folder);model=out/'best.pt';model.write_bytes(b'test-only')
