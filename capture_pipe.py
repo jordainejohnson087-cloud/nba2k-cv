@@ -1,5 +1,9 @@
 """Single-owner live capture and a two-buffer raw BGR display mailbox."""
 import json
+import hashlib
+import os
+import sys
+import tempfile
 import mmap
 import struct
 import threading
@@ -150,3 +154,51 @@ class SharedCapture:
 
     def release(self):
         if self.mailbox:self.mailbox.close();self.mailbox=None
+
+
+class CaptureLease:
+    """Cross-process ownership among app captures, probes and detector CLIs."""
+    def __init__(self,source,directory=None):
+        root=Path(directory or tempfile.gettempdir())/'nba2k-cv-capture'
+        root.mkdir(exist_ok=True)
+        key=hashlib.sha256(str(source).encode()).hexdigest()[:24]
+        self.file=(root/(key+'.lock')).open('a+b')
+        try:
+            self.file.seek(0,2)
+            if self.file.tell()==0:self.file.write(b'0');self.file.flush()
+            self.file.seek(0)
+            if sys.platform=='win32':
+                import msvcrt
+                msvcrt.locking(self.file.fileno(),msvcrt.LK_NBLCK,1)
+            else:
+                import fcntl
+                fcntl.flock(self.file.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except OSError:
+            self.file.close();self.file=None
+            raise RuntimeError('This card is already owned by another NBA2K CV capture or probe. Stop it, then retry Preview Capture.') from None
+
+    def close(self):
+        if self.file is None:return
+        try:
+            self.file.seek(0)
+            if sys.platform=='win32':
+                import msvcrt
+                msvcrt.locking(self.file.fileno(),msvcrt.LK_UNLCK,1)
+            else:
+                import fcntl
+                fcntl.flock(self.file.fileno(),fcntl.LOCK_UN)
+        finally:self.file.close();self.file=None
+
+
+class OwnedCapture:
+    def __init__(self,capture,lease):self.capture=capture;self.lease=lease
+    def __getattr__(self,name):return getattr(self.capture,name)
+    def release(self):
+        lease=self.lease
+        if lease is None:return
+        self.lease=None
+        try:self.capture.release()
+        finally:lease.close()
+    def __del__(self):
+        try:self.release()
+        except Exception:pass

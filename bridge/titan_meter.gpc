@@ -1,4 +1,4 @@
-#pragma METAINFO("NBA2K CV Meter Bridge", 2, 0, "NBA2K CV")
+#pragma METAINFO("NBA2K CV Meter Bridge", 2, 1, "NBA2K CV")
 #include <PS4.gph>
 // For the app's v2 packet only; byte zero is always zero (old Onyx will not fire).
 // Hold Square / Xbox X to start the down-stick phase. A fresh green event flicks.
@@ -26,21 +26,21 @@ main {
     combo_run(Heartbeat);
     if(packet_age < 1000) packet_age += elapsed_time();
     if(gcv_ready()) {
-        if(gcv_read(0) == 0 && gcv_read(1) == 77 && gcv_read(2) == 2) {
-            incoming_seq = ((uint32)gcv_read(19) << 24) | ((uint32)gcv_read(20) << 16)
-                         | ((uint32)gcv_read(21) << 8) | (uint32)gcv_read(22);
+        if(cv_byte(0) == 0 && cv_byte(1) == 77 && cv_byte(2) == 2) {
+            incoming_seq = ((uint32)cv_byte(19) << 24) | ((uint32)cv_byte(20) << 16)
+                         | ((uint32)cv_byte(21) << 8) | (uint32)cv_byte(22);
             if(incoming_seq != packet_seq) {
                 packet_seq = incoming_seq;
                 packet_age = 0;
-                armed = gcv_read(4) == 1;
-                green = gcv_read(3) == 1 && gcv_read(5) == 1;
+                armed = cv_byte(4) == 1;
+                green = cv_byte(3) == 1 && cv_byte(5) == 1;
                 flick_value = -100;
-                if(gcv_read(6) == 1) flick_value = 100;
-                delay_ms = ((uint16)gcv_read(7) << 8) | (uint16)gcv_read(8);
-                hold_ms = ((uint16)gcv_read(9) << 8) | (uint16)gcv_read(10);
-                event_id = ((uint32)gcv_read(11) << 24) | ((uint32)gcv_read(12) << 16)
-                         | ((uint32)gcv_read(13) << 8) | (uint32)gcv_read(14);
-                ttl = ((uint16)gcv_read(23) << 8) | (uint16)gcv_read(24);
+                if(cv_byte(6) == 1) flick_value = 100;
+                delay_ms = ((uint16)cv_byte(7) << 8) | (uint16)cv_byte(8);
+                hold_ms = ((uint16)cv_byte(9) << 8) | (uint16)cv_byte(10);
+                event_id = ((uint32)cv_byte(11) << 24) | ((uint32)cv_byte(12) << 16)
+                         | ((uint32)cv_byte(13) << 8) | (uint32)cv_byte(14);
+                ttl = ((uint16)cv_byte(23) << 8) | (uint16)cv_byte(24);
                 if(delay_ms > 250 || hold_ms < 10 || hold_ms > 500 || ttl < 25 || ttl > 250) armed = FALSE;
             }
         } else { armed = FALSE; }
@@ -92,4 +92,11 @@ main {
 combo Heartbeat {
     wait(500);
     printf("GCMD:ComputerVision.PY:T2CV:%d:%d:%d:%d", heartbeat_counter++, packet_seq, fired_event, mslot_get());
+}
+
+// GPC2 gcv_read writes into a typed destination; it does not return a byte.
+uint8 cv_byte(uint8 offset) {
+    uint8 value;
+    gcv_read(offset, &value);
+    return value;
 }

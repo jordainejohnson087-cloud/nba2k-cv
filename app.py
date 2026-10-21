@@ -297,7 +297,7 @@ class Desktop(tk.Tk):
         work.columnconfigure(0,weight=1);work.rowconfigure(2,weight=1)
         actions=ttk.Frame(work);actions.grid(row=0,column=0,sticky='ew',pady=(0,12))
         capture_actions=ttk.Frame(actions);capture_actions.pack(fill='x')
-        ttk.Button(capture_actions,text='▶  Start Capture',style='Accent.TButton',command=self._start_capture).pack(side='left')
+        ttk.Button(capture_actions,text='▶  Preview Capture',style='Accent.TButton',command=self._start_capture).pack(side='left')
         ttk.Button(capture_actions,text='■  Stop Capture',style='Stop.TButton',command=self._stop_capture).pack(side='left',padx=8)
         ttk.Label(capture_actions,text='Console view • no model required',style='Muted.TLabel').pack(side='left')
         ai_actions=ttk.Frame(actions);ai_actions.pack(fill='x',pady=(8,0))
@@ -571,7 +571,7 @@ class Desktop(tk.Tk):
                     else:
                         result=current
                     if not result['ready'] and not read_only:
-                        error=result['stage']+'. Connect Titan PROG to this PC, run titan_meter.gpc in the selected slot, and start bridge/gtuner_meter.py in Gtuner Computer Vision with Null Video Input. Keep that worker running; opening the files alone does not start it. Console OUTPUT/authentication is separate.'
+                        error=result['stage']+'. Connect Titan PROG to this PC, compile and install the updated bridge 2.1 titan_meter.gpc in the selected slot, and start bridge/gtuner_meter.py in Gtuner Computer Vision with Null Video Input. Keep that worker running; opening the files alone does not start it. Console OUTPUT/authentication is separate.'
                 if found and result is not None:result=dict(result,gtuner_path=str(found))
             except Exception as exc:
                 error=str(exc);result=service.status()
@@ -794,6 +794,18 @@ class Desktop(tk.Tk):
             if min(width,height,fps)<=0 or fps>240:raise ValueError()
         except ValueError:
             messagebox.showerror('Capture settings','Choose positive dimensions and a capture FPS up to 240.');return
+        probe=getattr(self,'capture_probe_process',None)
+        if probe is not None and probe.poll() is None:
+            deadline=getattr(self,'capture_handoff_deadline',0)
+            if not deadline:
+                self.capture_handoff_deadline=time.monotonic()+5
+                probe.terminate()
+            elif time.monotonic()>=deadline:
+                probe.kill()
+            self.status.set('Giving Preview Capture the card — releasing the app capture probe...')
+            self.capture_handoff_pending=True
+            self.after(100,self._resume_capture_handoff);return
+        self.capture_handoff_deadline=0
         out=self._out('capture_view')
         settings=dict(fps=int(self.display_fps.get()),mode=self.render_mode.get().lower(),enabled=self.preview.get())
         (out/'display_settings.json').write_text(json.dumps(settings))
@@ -803,17 +815,25 @@ class Desktop(tk.Tk):
             '--display-fps',self.display_fps.get(),'--render-mode',self.render_mode.get().lower(),
             '--display-settings',str(out/'display_settings.json')]+self._common((width,height,fps,1280,0))
         try:
-            process=subprocess.Popen(cmd,cwd=PROJECT,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1)
+            process=subprocess.Popen(cmd,cwd=PROJECT,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1,
+                creationflags=getattr(subprocess,'ABOVE_NORMAL_PRIORITY_CLASS',0) if sys.platform=='win32' else 0)
         except OSError as exc:
             messagebox.showerror('Capture failed',str(exc));return
         self._close_raw_preview();self.capture_process=process;self.capture_out=out;self.capture_active=True
+        self.capture_progress_at=time.monotonic();self.capture_progress_frames=0;self.capture_watchdog_fired=False
         self.display_count=0;self.display_started=time.perf_counter();self.status.set('Opening capture card — AI is stopped')
         def read_output():
             for line in process.stdout:self.messages.put(('text','Capture: '+line))
             self.messages.put(('capture_done',(process.wait(),str(out))))
         threading.Thread(target=read_output,daemon=True).start()
 
+    def _resume_capture_handoff(self):
+        if not getattr(self,'capture_handoff_pending',False):return
+        self.capture_handoff_pending=False
+        self._start_capture()
+
     def _stop_capture(self):
+        self.capture_handoff_pending=False;self.capture_handoff_deadline=0
         self._stop()
         if self.capture_active and self.capture_out:
             (self.capture_out/'capture_stop.request').touch()
@@ -870,6 +890,7 @@ class Desktop(tk.Tk):
         if not executable:return
         cmd=[executable,str(PROJECT/'run_live.py'),'--probe-only','--out',str(out)] + self._common(values)
         self._start(cmd,out)
+        self.capture_probe_process=self.process
 
     def _setup(self):
         if self._busy():return
@@ -971,10 +992,15 @@ class Desktop(tk.Tk):
                     elif self.pending_reconnect:self.after(3000,self._retry_bridge)
                 elif kind=='capture_done':
                     code,out=value
+                    if str(self.capture_out)!=out:continue
                     self.capture_active=False;self._close_raw_preview()
                     if self.live_active:self._stop()
                     self.status.set(f'Capture stopped (exit {code}) • {out}')
                     self._log(f'Capture results: {out}\n')
+                    if code:
+                        try:reason=json.loads((Path(out)/'capture_status.json').read_text()).get('error')
+                        except (OSError,ValueError):reason=None
+                        if reason:self.status.set(reason);self._log(reason+'\n')
                 elif kind=='release':
                     self.checking_updates=False
                     self._handle_release(value)
@@ -1013,10 +1039,27 @@ class Desktop(tk.Tk):
         if not self.capture_active or not self.capture_out:return
         try:
             value=json.loads((self.capture_out/'capture_status.json').read_text())
+            if value.get('frames',0)>getattr(self,'capture_progress_frames',0):
+                self.capture_progress_frames=value['frames'];self.capture_progress_at=time.monotonic()
+            if value.get('error'):self.status.set(value['error'])
             if not self.live_active:
                 self.capture_fps_label.set('—');self.inference_label.set('Off');self.observation_label.set('CAPTURE ONLY')
                 self.live_metrics.set(f"Capture {value['capture_fps']:.1f} FPS | AI stopped | card reports {value['reported_capture']['fps']:.1f} FPS")
         except (OSError,ValueError,KeyError):pass
+
+        process=self.capture_process
+        if (process is not None and process.poll() is None and
+                not getattr(self,'capture_watchdog_fired',False) and
+                time.monotonic()-getattr(self,'capture_progress_at',time.monotonic())>15):
+            self.capture_watchdog_fired=True
+            self._stop_capture()
+            error='Capture driver produced no frames for 15 seconds. Stopped this app capture worker; release the card in other software and retry Preview Capture.'
+            from run_live import atomic_write
+            try:atomic_write(self.capture_out/'capture_status.json',json.dumps(dict(state='stopped',frames=self.capture_progress_frames,timestamp=time.time(),error=error)).encode())
+            except OSError:pass
+            process.terminate()
+            self.after(2000,lambda:process.kill() if process.poll() is None else None)
+            self.status.set(error)
 
     def _bridge_tick(self):
         if self.bridge_service is None or time.monotonic()-self.bridge_tick_at<.5:return
@@ -1258,6 +1301,7 @@ class Desktop(tk.Tk):
         else:self.destroy()
 
     def destroy(self):
+        self.capture_handoff_pending=False
         if getattr(self,'capture_active',False) and self.capture_out:
             (self.capture_out/'capture_stop.request').touch()
         if getattr(self,'bridge_service',None):

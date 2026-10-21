@@ -126,3 +126,16 @@ class ColorTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+
+class GpcReadContractTests(unittest.TestCase):
+    def test_gpc_reads_bytes_through_a_typed_destination(self):
+        import re
+        source=(Path(__file__).resolve().parents[1]/'bridge'/'titan_meter.gpc').read_text()
+        calls=re.findall(r'\bgcv_read\(([^)]*)\)',source)
+        self.assertEqual(calls,['offset, &value'])
+        offsets=[int(n) for n in re.findall(r'cv_byte\((\d+)\)',source)]
+        self.assertTrue(offsets)
+        self.assertTrue(all(0<=n<25 for n in offsets))
+        self.assertIn('uint8 value;',source)
+        self.assertIn('return value;',source)

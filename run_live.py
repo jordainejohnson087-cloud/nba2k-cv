@@ -14,18 +14,24 @@ from meter_core import Config, Detection, MeterTracker
 from run_video import estimate_fill
 from live_link import BridgeClient, SnapshotPublisher, atomic_write
 from titan_control import GtunerController, slot_number, choose_meter_slot, discover_gtuner, valid_gtuner_path, launch_gtuner_background
-from capture_pipe import LatestCapture, RawMailbox, SharedCapture
+from capture_pipe import LatestCapture, RawMailbox, SharedCapture, CaptureLease, OwnedCapture
 from bridge_service import BridgeService, BridgeServiceClient
 from meter_green import GreenGate, green_config, measure_green
 
 
 def open_capture(cv2, source, windows_dshow=False, backend="auto"):
     index = int(source) if source.isdecimal() else source
-    if isinstance(index,int) and (windows_dshow or backend=="dshow"):
-        return cv2.VideoCapture(index,cv2.CAP_DSHOW)
-    if isinstance(index,int) and backend=="msmf":
-        return cv2.VideoCapture(index,cv2.CAP_MSMF)
-    return cv2.VideoCapture(index)
+    lease=CaptureLease(index) if isinstance(index,int) else None
+    try:
+        if isinstance(index,int) and (windows_dshow or backend=="dshow"):
+            cap=cv2.VideoCapture(index,cv2.CAP_DSHOW)
+        elif isinstance(index,int) and backend=="msmf":
+            cap=cv2.VideoCapture(index,cv2.CAP_MSMF)
+        else:cap=cv2.VideoCapture(index)
+        return OwnedCapture(cap,lease) if lease else cap
+    except BaseException:
+        if lease:lease.close()
+        raise
 
 
 def configure_capture(cv2, cap, args):
@@ -47,6 +53,7 @@ def probe_capture(args, cv2, clock=time.perf_counter):
     """Measure capture delivery without loading the model or rendering UI."""
     cap = open_capture(cv2,str(args.source),args.dshow,getattr(args,"backend","auto"))
     if not cap.isOpened():
+        cap.release()
         raise RuntimeError(f'Cannot open capture source {args.source}')
     try:
         reported = configure_capture(cv2,cap,args)
@@ -141,6 +148,7 @@ def run(args, cv2, torch, YOLO):
     shared=getattr(args,"capture_session",None)
     cap = SharedCapture(shared,cv2) if shared else open_capture(cv2, source, args.dshow,getattr(args,"backend","auto"))
     if not cap.isOpened():
+        cap.release()
         raise RuntimeError(f"Cannot open capture source {source}; check its device index and that another app is not using it")
     mode = configure_capture(cv2,cap,args)
     # Some backends ignore buffer size; timing diagnostics remain authoritative.
@@ -425,9 +433,30 @@ def run(args, cv2, torch, YOLO):
 
 def run_capture_only(args,cv2):
     args.out.mkdir(parents=True,exist_ok=True)
-    cap=open_capture(cv2,str(args.source),args.dshow,getattr(args,'backend','auto'))
-    if not cap.isOpened():
-        cap.release();raise RuntimeError('Cannot open capture card; close other software using that card.')
+    # Driver release can lag behind a stopped probe or closed video app.
+    deadline=time.monotonic()+3
+    while True:
+        cap=None
+        try:
+            cap=open_capture(cv2,str(args.source),args.dshow,getattr(args,'backend','auto'))
+            if cap.isOpened():break
+            cap.release()
+            error='Cannot open capture card. Close OBS, Camera or the capture utility using it. Set Gtuner CV to Null Video Input, then retry Preview Capture.'
+        except Exception as exc:
+            if cap is not None:cap.release()
+            error=str(exc)
+        atomic_write(args.out/'capture_status.json',json.dumps(dict(state='opening',timestamp=time.time(),frames=0,error=error,model_loaded=False)).encode())
+        if time.monotonic()>=deadline:
+            report=dict(state='stopped',timestamp=time.time(),frames=0,error=error,model_loaded=False,stop_reason='capture_open_failed')
+            atomic_write(args.out/'capture_status.json',json.dumps(report).encode())
+            atomic_write(args.out/'capture_run.json',json.dumps(report,indent=2).encode())
+            raise RuntimeError(error)
+        if args.stop_file and args.stop_file.exists():
+            report=dict(state='stopped',timestamp=time.time(),frames=0,stop_reason='user_stopped',model_loaded=False,error=None)
+            atomic_write(args.out/'capture_status.json',json.dumps(report).encode())
+            atomic_write(args.out/'capture_run.json',json.dumps(report).encode())
+            return report
+        time.sleep(.25)
     preview=source=None;count=0;reason='stopped';error=None;intervals=[];last=None
     start=time.perf_counter();last_status=0;next_display=0;settings_checked=0
     mode={};display_fps=args.display_fps;render_mode=args.render_mode;enabled=True

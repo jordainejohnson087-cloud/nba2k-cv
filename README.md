@@ -232,3 +232,11 @@ Before publishing, run the unit suite and Windows GUI smoke check. The GUI check
 Each release needs both `NBA2K_CV_Update.zip` and `update.json`. The latest feed selects a release, but its manifest must point to that specific tag’s ZIP. This prevents a newer release changing the ZIP underneath an older manifest during an update. Creating an empty release does not provide an app update. Verify both assets are attached and the downloaded ZIP matches the manifest’s version, byte count, and SHA-256 before announcing availability.
 
 Physical Titan/console verification and labeled gameplay accuracy remain separate from software tests. A verified local API or GPC echo does not prove console output or meter-detection accuracy.
+
+### Preview Capture ownership and bridge 2.1
+
+Preview Capture stops this app's active capture probe before opening the card. Card-owning app processes share a cross-process lock per numeric device index; AI reads the existing shared stream. On Windows the preview capture child runs at Above Normal CPU priority. This improves scheduling priority; it cannot override another program's exclusive driver handle. Close OBS, Camera, or the capture vendor utility if they hold the card, and use Null Video Input for the Gtuner bridge worker. Device indexes are local to Windows video APIs, so choose the matching physical card explicitly for each backend.
+
+Failed opens retry for three seconds and save a clear capture failure report. Native driver calls can block past that retry interval; the UI independently terminates its capture child if it makes no frame progress for 15 seconds. Stop cancels a pending probe-to-preview handoff. No unrelated application is force-terminated.
+
+The exported meter GPC is now bridge 2.1. CV byte reads use `gcv_read(offset, &value)` into a uint8 destination before decoding the existing 25-byte protocol. Recompile and replace the installed meter slot once using this exported script; updating Python files cannot change code already stored on the Titan. Gtuner's vendor compiler and physical console bridge are not available in the local test environment, so the read-contract tests do not constitute a GPC compiler or hardware pass.

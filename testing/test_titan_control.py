@@ -118,3 +118,38 @@ class BridgeStartupTests(unittest.TestCase):
         _,(_,result,error,_)=app.messages.get_nowait()
         self.assertFalse(result['ready'])
         self.assertIn('Null Video Input',error)
+
+
+class CapturePriorityTests(unittest.TestCase):
+    def test_preview_stops_only_its_own_probe_before_retrying(self):
+        from app import Desktop
+        from types import SimpleNamespace
+        probe=Mock();probe.poll.return_value=None
+        def variable(value):
+            result=Mock();result.get.return_value=value;return result
+        app=SimpleNamespace(capture_active=False,updating=False,width=variable('1920'),
+            height=variable('1080'),fps=variable('60'),capture_probe_process=probe,
+            status=Mock(),after=Mock(),_start_capture=Mock(),_resume_capture_handoff=Mock())
+        Desktop._start_capture(app)
+        probe.terminate.assert_called_once();probe.kill.assert_not_called()
+        self.assertTrue(app.capture_handoff_pending)
+        self.assertEqual(app.after.call_args.args[0],100)
+        # A Stop click cancels a previously queued handoff.
+        app.capture_handoff_pending=False
+        Desktop._resume_capture_handoff(app)
+        app._start_capture.assert_not_called()
+
+    def test_stalled_native_capture_is_terminated_outside_driver_process(self):
+        from app import Desktop
+        from types import SimpleNamespace
+        from pathlib import Path
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            process=Mock();process.poll.return_value=None
+            app=SimpleNamespace(capture_active=True,capture_out=Path(folder),capture_process=process,
+                capture_progress_at=0,capture_progress_frames=0,capture_watchdog_fired=False,
+                _stop_capture=Mock(),after=Mock(),status=Mock())
+            with patch('app.time.monotonic',return_value=100):Desktop._capture_tick(app)
+            process.terminate.assert_called_once();app._stop_capture.assert_called_once()
+            self.assertEqual(app.after.call_args.args[0],2000)
+            self.assertTrue(app.capture_watchdog_fired)

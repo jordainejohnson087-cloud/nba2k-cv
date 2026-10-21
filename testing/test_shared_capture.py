@@ -64,3 +64,18 @@ class SeparateCaptureTests(unittest.TestCase):
                 self.assertFalse(thread.is_alive());self.assertFalse(failures)
             report=json.loads((session/'capture_run.json').read_text())
             self.assertFalse(report['model_loaded']);self.assertTrue(card.released)
+
+    def test_busy_card_open_is_retried_then_reported_without_loading_ai(self):
+        from unittest.mock import Mock
+        with tempfile.TemporaryDirectory() as folder:
+            out=Path(folder)
+            args=SimpleNamespace(out=out,source='0',dshow=False,backend='dshow',stop_file=out/'stop')
+            card=Mock();card.isOpened.return_value=False
+            with patch.object(run_live,'open_capture',return_value=card) as attempt,patch.object(run_live.time,'monotonic',side_effect=[0,0,4]),patch.object(run_live.time,'sleep'):
+                with self.assertRaisesRegex(RuntimeError,'Null Video Input'):
+                    run_live.run_capture_only(args,cv2)
+            self.assertEqual(attempt.call_count,2)
+            self.assertEqual(card.release.call_count,2)
+            report=json.loads((out/'capture_status.json').read_text())
+            self.assertEqual(report['stop_reason'],'capture_open_failed')
+            self.assertFalse(report['model_loaded'])

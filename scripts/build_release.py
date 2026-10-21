@@ -33,7 +33,7 @@ def build(archive, repository):
                         (ROOT/'live_link.py').read_text(encoding='utf-8'))
     live = live.replace('from bridge_service import BridgeService, BridgeServiceClient',
                         (ROOT/'bridge_service.py').read_text(encoding='utf-8').replace('from live_link import BridgeClient',''))
-    live = live.replace('from capture_pipe import LatestCapture, RawMailbox, SharedCapture',
+    live = live.replace('from capture_pipe import LatestCapture, RawMailbox, SharedCapture, CaptureLease, OwnedCapture',
                         (ROOT/'capture_pipe.py').read_text(encoding='utf-8'))
     live = live.replace('from titan_control import GtunerController, slot_number, choose_meter_slot, discover_gtuner, valid_gtuner_path, launch_gtuner_background',
                         (ROOT/'titan_control.py').read_text(encoding='utf-8'))

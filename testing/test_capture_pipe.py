@@ -95,8 +95,35 @@ class CapturePipeTests(unittest.TestCase):
 
     def test_backend_selection_does_not_silently_choose_another_api(self):
         calls=[]
-        cv=SimpleNamespace(VideoCapture=lambda *args:calls.append(args),CAP_DSHOW=700,CAP_MSMF=1400)
-        run_live.open_capture(cv,'0',backend='msmf')
-        run_live.open_capture(cv,'1',backend='dshow')
-        run_live.open_capture(cv,'rtsp://example',backend='msmf')
+        from unittest.mock import Mock
+        def create(*args):calls.append(args);return Mock()
+        cv=SimpleNamespace(VideoCapture=create,CAP_DSHOW=700,CAP_MSMF=1400)
+        for source,backend in [('0','msmf'),('1','dshow'),('rtsp://example','msmf')]:
+            capture=run_live.open_capture(cv,source,backend=backend)
+            capture.release()
         self.assertEqual(calls,[(0,1400),(1,700),('rtsp://example',)])
+
+
+class CaptureOwnershipTests(unittest.TestCase):
+    def test_another_process_cannot_open_the_same_app_card_lease(self):
+        import subprocess,sys
+        from capture_pipe import CaptureLease
+        code='from capture_pipe import CaptureLease; import sys; CaptureLease("card",sys.argv[1])'
+        with tempfile.TemporaryDirectory() as root:
+            lease=CaptureLease('card',root)
+            try:
+                result=subprocess.run([sys.executable,'-c',code,root],capture_output=True,text=True,timeout=5)
+                self.assertNotEqual(result.returncode,0)
+                self.assertIn('already owned',result.stderr)
+                other=CaptureLease('other-card',root);other.close()
+            finally:lease.close()
+            result=subprocess.run([sys.executable,'-c',code,root],capture_output=True,text=True,timeout=5)
+            self.assertEqual(result.returncode,0,result.stderr)
+
+    def test_constructor_error_releases_ownership_for_retry(self):
+        from unittest.mock import Mock
+        card=Mock()
+        cv=SimpleNamespace(VideoCapture=Mock(side_effect=[OSError('device busy'),card]),CAP_DSHOW=700)
+        with self.assertRaises(OSError):run_live.open_capture(cv,'8765')
+        capture=run_live.open_capture(cv,'8765')
+        capture.release();card.release.assert_called_once()
