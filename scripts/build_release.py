@@ -52,7 +52,10 @@ def build(archive, repository):
     archive.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED) as output:
         for name, data in files.items():
-            output.writestr(name, data)
+            info=zipfile.ZipInfo(name,date_time=(2000,1,1,0,0,0))
+            info.create_system=3;info.external_attr=0o100644<<16
+            info.compress_type=zipfile.ZIP_DEFLATED
+            output.writestr(info,data)
     with zipfile.ZipFile(archive) as check:
         if check.testzip() is not None:
             raise ValueError('Release ZIP failed integrity check')

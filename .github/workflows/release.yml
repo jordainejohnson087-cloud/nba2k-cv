@@ -3,51 +3,142 @@ on:
   push:
     tags:
       - 'v*'
-permissions:
-  contents: write
-jobs:
   release:
+    types: [published]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  prepare:
+    if: github.event_name != 'release' || (!github.event.release.prerelease && !github.event.release.draft)
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      source_sha: ${{ steps.version.outputs.source_sha }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || github.ref }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install test dependencies
-        run: python -m pip install -r requirements.txt
-      - name: Verify tests
-        run: python -m unittest discover -s testing -v
-      - name: Build and verify update
+      - name: Resolve and validate the exact release source
+        id: version
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
-          REPOSITORY: ${{ github.repository }}
+          REQUESTED_TAG: ${{ github.event.release.tag_name || (startsWith(github.ref, 'refs/tags/') && github.ref_name) || '' }}
         run: |
           python - <<'PY'
-          import json, os
+          import json, os, subprocess
           from pathlib import Path
           version = json.loads(Path('app_version.json').read_text())['version']
-          if os.environ['RELEASE_TAG'] != f'v{version}':
+          if type(version) is not int or version <= 0:
+              raise SystemExit('Invalid app version')
+          tag = f'v{version}'
+          if os.environ['REQUESTED_TAG'] and os.environ['REQUESTED_TAG'] != tag:
               raise SystemExit('Tag must equal v plus app_version.json version')
+          sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'tag={tag}\nsource_sha={sha}\n')
           PY
-          python scripts/build_release.py --repository "$REPOSITORY" --out NBA2K_CV_Update.zip
-          python testing/make_update_manifest.py --archive NBA2K_CV_Update.zip --download-url "https://github.com/$REPOSITORY/releases/download/$RELEASE_TAG/NBA2K_CV_Update.zip" --out update.json
-          python - <<'PY'
-          import json, zipfile
-          from pathlib import Path
-          from app_update import ALLOWED
-          archive = Path('NBA2K_CV_Update.zip')
-          manifest = json.loads(Path('update.json').read_text())
-          with zipfile.ZipFile(archive) as z:
-              assert set(z.namelist()) == ALLOWED
-              assert json.loads(z.read('app_version.json'))['version'] == manifest['version']
-          PY
-      - name: Publish release assets
+      - name: Refuse to replace an existing version with different source
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          SOURCE_SHA: ${{ steps.version.outputs.source_sha }}
+        run: |
+          existing=$(git ls-remote --tags origin "refs/tags/$RELEASE_TAG")
+          if [ -n "$existing" ]; then
+            git fetch origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+            if [ "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" != "$SOURCE_SHA" ]; then
+              echo 'This version already belongs to another commit. Increment app_version.json before publishing.' >&2
+              exit 1
+            fi
+          fi
+  windows:
+    needs: prepare
+    uses: ./.github/workflows/windows-validation.yml
+    with:
+      ref: ${{ needs.prepare.outputs.source_sha }}
+  release:
+    needs: [prepare, windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    concurrency:
+      group: desktop-update-feed
+      cancel-in-progress: false
+    env:
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Download the package tested on Windows
+        uses: actions/download-artifact@v4
+        with:
+          name: validated-desktop-update
+          path: dist
+      - name: Generate and validate the version-pinned update feed
+        run: |
+          mv dist/release.zip dist/NBA2K_CV_Update.zip
+          python testing/make_update_manifest.py --archive dist/NBA2K_CV_Update.zip --download-url "https://github.com/$GH_REPO/releases/download/$RELEASE_TAG/NBA2K_CV_Update.zip" --out dist/update.json
+          python testing/make_update_manifest.py --verify --archive dist/NBA2K_CV_Update.zip --manifest dist/update.json --tag "$RELEASE_TAG"
+      - name: Stage both assets and verify their uploaded bytes
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" NBA2K_CV_Update.zip update.json --clobber
-          else
-            gh release create "$RELEASE_TAG" NBA2K_CV_Update.zip update.json --verify-tag --title "$RELEASE_TAG" --notes 'NBA2K CV desktop update'
+          existing=$(git ls-remote --tags origin "refs/tags/$RELEASE_TAG")
+          if [ -n "$existing" ]; then
+            git fetch origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+            test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$SOURCE_SHA"
           fi
+          if gh release view "$RELEASE_TAG" --json tagName,isPrerelease > release-state.json 2>/dev/null; then
+            python -c 'import json; r=json.load(open("release-state.json")); assert not r["isPrerelease"], "Refusing to change a prerelease into a stable update"'
+          else
+            gh release create "$RELEASE_TAG" --draft --target "$SOURCE_SHA" --title "$RELEASE_TAG" --notes 'NBA2K CV desktop update. Windows validation and package verification passed.'
+          fi
+          gh release upload "$RELEASE_TAG" dist/NBA2K_CV_Update.zip --clobber
+          gh release upload "$RELEASE_TAG" dist/update.json --clobber
+          gh release download "$RELEASE_TAG" --pattern NBA2K_CV_Update.zip --pattern update.json --dir verified-assets
+          python testing/make_update_manifest.py --verify --archive verified-assets/NBA2K_CV_Update.zip --manifest verified-assets/update.json --tag "$RELEASE_TAG"
+      - name: Publish without rolling the latest feed backward
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release list --json tagName,isDraft,isPrerelease --limit 100 > release-list.json
+          make_latest=$(python - <<'PY'
+          import json, os, re
+          version = int(os.environ['RELEASE_TAG'][1:])
+          newer = any(not r['isDraft'] and not r['isPrerelease'] and
+                      re.fullmatch(r'v[1-9][0-9]*', r['tagName']) and int(r['tagName'][1:]) > version
+                      for r in json.load(open('release-list.json')))
+          print('false' if newer else 'true')
+          PY
+          )
+          gh release edit "$RELEASE_TAG" --draft=false --latest="$make_latest"
+      - name: Verify the published public download
+        run: |
+          python - <<'PY'
+          import os, time, urllib.request
+          from pathlib import Path
+          folder = Path('public-assets'); folder.mkdir()
+          base = f"https://github.com/{os.environ['GH_REPO']}/releases/download/{os.environ['RELEASE_TAG']}/"
+          for name in ('NBA2K_CV_Update.zip', 'update.json'):
+              for attempt in range(3):
+                  try:
+                      with urllib.request.urlopen(base + name, timeout=20) as response:
+                          data = response.read(20 * 1024 * 1024 + 1)
+                      if len(data) > 20 * 1024 * 1024: raise ValueError('Asset exceeds size limit')
+                      (folder / name).write_bytes(data)
+                      break
+                  except Exception:
+                      if attempt == 2: raise
+                      time.sleep(2)
+          PY
+          python testing/make_update_manifest.py --verify --archive public-assets/NBA2K_CV_Update.zip --manifest public-assets/update.json --tag "$RELEASE_TAG"

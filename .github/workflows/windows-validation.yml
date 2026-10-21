@@ -4,6 +4,7 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/windows-validation.yml'
+      - '.github/workflows/release.yml'
       - 'scripts/**'
       - 'meter_green.py'
       - 'live_link.py'
@@ -21,6 +22,12 @@ on:
       - 'testing/**'
       - 'Launch NBA2K CV.bat'
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: Exact source commit to validate
+        required: true
+        type: string
 permissions:
   contents: read
 jobs:
@@ -29,6 +36,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.14'
@@ -53,6 +62,13 @@ jobs:
           Push-Location test_results\bundle
           ..\..\.venv\Scripts\python.exe -c "import run_live; assert run_live.GTUNER_SOURCE; assert run_live.HEARTBEAT_SOURCE; print('Bundled runtime imported')"
           Pop-Location
+      - name: Retain validated update package
+        uses: actions/upload-artifact@v4
+        with:
+          name: validated-desktop-update
+          path: test_results/release.zip
+          if-no-files-found: error
+          retention-days: 7
       - name: Upload desktop design preview
         uses: actions/upload-artifact@v4
         with:

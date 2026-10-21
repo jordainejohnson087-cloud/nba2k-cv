@@ -108,3 +108,113 @@ class UpdateTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+
+class GitHubFeedTests(unittest.TestCase):
+    repository='example/nba2k-cv'
+    root='https://github.com/example/nba2k-cv/releases/'
+    feed=root+'latest/download/update.json'
+    api='https://api.github.com/repos/example/nba2k-cv/releases?per_page=20'
+
+    class Response(io.BytesIO):
+        def __init__(self,data,url):super().__init__(json.dumps(data).encode());self.url=url
+        def geturl(self):return self.url
+
+    def release(self,version,**changes):
+        base=self.root+'download/v'+str(version)+'/'
+        return dict(tag_name='v'+str(version),draft=False,prerelease=False,
+                    assets=[dict(name=name,state='uploaded',size=4,digest='sha256:'+'a'*64,
+                                 browser_download_url=base+name) for name in ('NBA2K_CV_Update.zip','update.json')],**changes)
+
+    def info(self,version=2):
+        return dict(version=version,size_bytes=4,sha256='a'*64,
+                    download_url=self.root+'latest/download/NBA2K_CV_Update.zip')
+
+    def test_empty_latest_release_falls_back_to_complete_stable_release(self):
+        import urllib.error
+        calls=[]
+        def opener(url,timeout):
+            calls.append(url)
+            if url==self.feed:raise urllib.error.HTTPError(url,404,'missing',{},None)
+            if url==self.api:return self.Response([dict(self.release(3),assets=[]),dict(self.release(4),prerelease=True),self.release(2)],url)
+            self.assertEqual(url,self.root+'download/v2/update.json')
+            return self.Response(self.info(),url)
+        with tempfile.TemporaryDirectory() as folder:
+            result=app_update.fetch_manifest(self.feed,folder,opener)
+        self.assertEqual(result['version'],2)
+        self.assertEqual(result['download_url'],self.root+'download/v2/NBA2K_CV_Update.zip')
+        self.assertEqual(len(calls),3)
+
+    def test_old_github_manifest_zip_url_is_pinned_before_download(self):
+        with tempfile.TemporaryDirectory() as folder:
+            result=app_update.fetch_manifest(self.feed,folder,lambda url,timeout:self.Response(self.info(),url))
+        self.assertEqual(result['download_url'],self.root+'download/v2/NBA2K_CV_Update.zip')
+
+    def test_release_without_assets_has_an_actionable_error(self):
+        import urllib.error
+        def opener(url,timeout):
+            if url==self.feed:raise urllib.error.HTTPError(url,404,'missing',{},None)
+            return self.Response([dict(self.release(3),assets=[])],url)
+        with tempfile.TemporaryDirectory() as folder:
+            with self.assertRaisesRegex(ValueError,'No complete app update'):
+                app_update.fetch_manifest(self.feed,folder,opener)
+
+    def test_fallback_rejects_manifest_for_a_different_release(self):
+        import urllib.error
+        def opener(url,timeout):
+            if url==self.feed:raise urllib.error.HTTPError(url,404,'missing',{},None)
+            return self.Response([self.release(2)] if url==self.api else self.info(3),url)
+        with tempfile.TemporaryDirectory() as folder:
+            with self.assertRaisesRegex(ValueError,'do not match'):
+                app_update.fetch_manifest(self.feed,folder,opener)
+
+    def test_non_404_failure_does_not_silently_select_an_old_release(self):
+        import urllib.error
+        calls=[]
+        def opener(url,timeout):
+            calls.append(url);raise urllib.error.HTTPError(url,500,'server error',{},None)
+        with tempfile.TemporaryDirectory() as folder:
+            with self.assertRaises(urllib.error.HTTPError):app_update.fetch_manifest(self.feed,folder,opener)
+        self.assertEqual(calls,[self.feed])
+
+    def test_missing_zip_preserves_existing_download_and_explains_release_failure(self):
+        import urllib.error
+        def opener(url,timeout):raise urllib.error.HTTPError(url,404,'missing',{},None)
+        with tempfile.TemporaryDirectory() as folder:
+            saved=Path(folder)/'updates'/'downloads'/'NBA2K_CV_Update_2.zip'
+            saved.parent.mkdir(parents=True);saved.write_bytes(b'previous verified download')
+            with self.assertRaisesRegex(ValueError,'ZIP is missing'):
+                app_update.download_release(self.info(),folder,opener)
+            self.assertEqual(saved.read_bytes(),b'previous verified download')
+            self.assertFalse(saved.with_suffix('.partial').exists())
+
+    def test_non_object_manifest_is_rejected(self):
+        with tempfile.TemporaryDirectory() as folder:
+            with self.assertRaisesRegex(ValueError,'Invalid update manifest'):
+                app_update.fetch_manifest(self.feed,folder,lambda url,timeout:self.Response([],url))
+
+
+class ReleaseArtifactTests(unittest.TestCase):
+    def test_build_is_reproducible_and_published_bytes_are_verified(self):
+        from testing.make_update_manifest import make_manifest,verify_manifest
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);first=root/'first.zip';second=root/'second.zip';manifest=root/'update.json'
+            version,_=build(first,'example/nba2k-cv');build(second,'example/nba2k-cv')
+            self.assertEqual(first.read_bytes(),second.read_bytes())
+            tag='v'+str(version)
+            url='https://github.com/example/nba2k-cv/releases/download/'+tag+'/NBA2K_CV_Update.zip'
+            manifest.write_text(json.dumps(make_manifest(first,url)))
+            self.assertEqual(verify_manifest(first,manifest,tag)['version'],version)
+            first.write_bytes(first.read_bytes()+b'tampered')
+            with self.assertRaisesRegex(ValueError,'SHA-256'):
+                verify_manifest(first,manifest,tag)
+
+    def test_publishing_rejects_mutable_latest_url(self):
+        from testing.make_update_manifest import make_manifest,verify_manifest
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);archive=root/'release.zip';manifest=root/'update.json'
+            version,_=build(archive,'example/nba2k-cv')
+            info=make_manifest(archive,'https://github.com/example/nba2k-cv/releases/latest/download/NBA2K_CV_Update.zip')
+            manifest.write_text(json.dumps(info))
+            with self.assertRaisesRegex(ValueError,'pinned'):
+                verify_manifest(archive,manifest,'v'+str(version))

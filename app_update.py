@@ -1,5 +1,7 @@
 """Install a downloaded code-only update safely, preserving user data."""
 import json
+import re
+import urllib.error
 import hashlib
 import os
 import shutil
@@ -43,24 +45,76 @@ def _https(url):
         raise ValueError('Update links must use HTTPS')
 
 
-def fetch_manifest(url, project, opener=urllib.request.urlopen):
+def _read_update_json(url,opener,limit=MAX_MANIFEST_BYTES):
     _https(url)
     with opener(url,timeout=15) as response:
         if urlparse(response.geturl()).scheme!='https':
             raise ValueError('Update feed redirected away from HTTPS')
-        data=response.read(MAX_MANIFEST_BYTES+1)
-    if len(data)>MAX_MANIFEST_BYTES:raise ValueError('Update manifest is too large')
-    info=json.loads(data)
+        data=response.read(limit+1)
+    if len(data)>limit:raise ValueError('Update response is too large')
+    return json.loads(data)
+
+
+def _github_feed_root(url):
+    match=re.fullmatch(r'https://github[.]com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/releases/latest/download/update[.]json',url)
+    return match[1] if match else None
+
+
+def _complete_github_release(repository,opener):
+    releases=_read_update_json('https://api.github.com/repos/'+repository+'/releases?per_page=20',opener,1024*1024)
+    if not isinstance(releases,list):raise ValueError('Invalid GitHub release list')
+    candidates=[]
+    for release in releases:
+        if not isinstance(release,dict) or release.get('draft') or release.get('prerelease'):continue
+        tag=release.get('tag_name','')
+        match=re.fullmatch(r'v([1-9][0-9]*)',tag) if isinstance(tag,str) else None
+        if not match:continue
+        assets=release.get('assets',[])
+        if not isinstance(assets,list):continue
+        assets={asset.get('name'):asset for asset in assets if isinstance(asset,dict) and asset.get('state')=='uploaded'}
+        if not {'update.json','NBA2K_CV_Update.zip'}.issubset(assets):continue
+        base='https://github.com/'+repository+'/releases/download/'+tag+'/'
+        if any(assets[name].get('browser_download_url')!=base+name for name in ('update.json','NBA2K_CV_Update.zip')):continue
+        size=assets['NBA2K_CV_Update.zip'].get('size')
+        if type(size) is not int or not 0<size<=MAX_DOWNLOAD_BYTES:continue
+        candidates.append((int(match[1]),base,assets['NBA2K_CV_Update.zip']))
+    if not candidates:raise ValueError('No complete app update is published yet. The release needs NBA2K_CV_Update.zip and update.json; wait for Publish desktop update to finish.')
+    version,base,asset=max(candidates,key=lambda item:item[0])
+    return _read_update_json(base+'update.json',opener),version,asset
+
+
+def fetch_manifest(url, project, opener=urllib.request.urlopen):
+    repository=_github_feed_root(url)
+    release_version=asset=None
+    try:info=_read_update_json(url,opener)
+    except urllib.error.HTTPError as exc:
+        if exc.code!=404:raise
+        if not repository:raise ValueError('Update manifest was not found. Check the configured update feed.') from exc
+        try:info,release_version,asset=_complete_github_release(repository,opener)
+        except urllib.error.HTTPError as pending:
+            if pending.code==404:raise ValueError('Release files are not available yet. Retry after Publish desktop update finishes.') from pending
+            raise
+    if not isinstance(info,dict):raise ValueError('Invalid update manifest')
     version=info.get('version')
     download=info.get('download_url')
     digest=info.get('sha256')
     size=info.get('size_bytes')
-    if type(version) is not int or type(size) is not int or not 0<size<=MAX_DOWNLOAD_BYTES:
+    if type(version) is not int or version<=0 or type(size) is not int or not 0<size<=MAX_DOWNLOAD_BYTES:
         raise ValueError('Invalid release version or size')
     if not isinstance(download,str):raise ValueError('Release URL missing')
     _https(download)
     if not isinstance(digest,str) or len(digest)!=64 or any(c not in '0123456789abcdef' for c in digest):
         raise ValueError('Invalid release SHA-256')
+    # Old manifests used /latest/ for the ZIP, which can change mid-update.
+    if repository:
+        base='https://github.com/'+repository+'/releases/'
+        if download==base+'latest/download/NBA2K_CV_Update.zip':
+            info=dict(info,download_url=base+'download/v'+str(version)+'/NBA2K_CV_Update.zip')
+    if release_version is not None:
+        if version!=release_version or size!=asset['size'] or info['download_url']!=asset['browser_download_url']:
+            raise ValueError('GitHub release assets do not match the update manifest')
+        if asset.get('digest') is not None and asset['digest']!='sha256:'+digest:
+            raise ValueError('GitHub asset digest does not match the update manifest')
     return info if version>current_version(project) else None
 
 
@@ -87,6 +141,9 @@ def download_release(info, project, opener=urllib.request.urlopen):
         if version!=info['version']:raise ValueError('Release version differs from manifest')
         os.replace(temporary,target)
         return target
+    except urllib.error.HTTPError as exc:
+        if exc.code==404:raise ValueError('The update ZIP is missing from its release. Retry after the release workflow finishes.') from exc
+        raise
     finally:
         temporary.unlink(missing_ok=True)
 
