@@ -8,6 +8,7 @@ import math
 import socket
 import struct
 import time
+import sys
 
 PORT = 26740
 STALE_SECONDS = .25
@@ -48,6 +49,8 @@ class GCVWorker:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(('127.0.0.1', PORT))
         self.socket.setblocking(False)
+        self.callback_seen=False;self.packet_seen=False
+        print('NBA2K CV bridge v2: Python '+sys.version.split()[0]+'; UDP 127.0.0.1:'+str(PORT)+' bound. Waiting for GCV callbacks.',flush=True)
         self.packet = {}
         self.last_packet = 0
         self.hardware_counter = None
@@ -60,6 +63,9 @@ class GCVWorker:
     def process(self, frame):
         import gtuner
         now = time.monotonic()
+        if not self.callback_seen:
+            self.callback_seen=True
+            print('NBA2K CV bridge: GCV callbacks active. Waiting for app telemetry.',flush=True)
         message = gtuner.gpc_string()
         if message is not None:
             try:
@@ -96,6 +102,9 @@ class GCVWorker:
                 if packet['seq'] <= self.packet.get('seq',0):
                     continue
                 self.packet = packet
+                if not self.packet_seen:
+                    self.packet_seen=True
+                    print('NBA2K CV bridge: valid app telemetry received; sending acknowledgments.',flush=True)
                 self.last_packet = now
                 ack = dict(session=packet['session'],seq=packet['seq'],
                     hardware_counter=self.hardware_counter,active_slot=self.active_slot,device_sequence=self.device_sequence,device_event=self.device_event,

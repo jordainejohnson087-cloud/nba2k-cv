@@ -1,0 +1,13 @@
+# Windows capture status replacement failure — 2026102108
+
+The supplied run log shows capture terminating on WinError 5 when replacing capture_status.json, CPU inference at 10.3257 FPS against a reported 120 FPS source, and zero acknowledged Gtuner packets. These are separate failure stages. The status replacement failure alone does not prove a hardware capture disconnect. Candidate shot counts are not validated shot counts.
+
+The file update path now stages each write under a unique temporary name, avoiding collisions between writers. General atomic writes retry access-denied replacement a bounded number of times and clean their staging files. Capture's optional UI status never sleeps/retries in the frame loop: a denied status update is skipped, counted, and retried on the next publication tick. The capture report records status_write_failures and last_status_write_error. Other I/O failures are not silently suppressed.
+
+The UI watchdog also reads publication metadata directly from source_frames.bin, without copying image pixels. Healthy frame publication keeps capture alive even when the status JSON is unavailable. The final stopped-state write is best effort; capture_run.json remains the final report. This does not alter directory permissions, disable antivirus, request administrator access, or seize a device from another app.
+
+The selected inference device is printed at engine startup and shown beside the live inference timing. The user's CUDA capability must be checked in the exact Python environment selected for detection. Gtuner's separate Python 3.10/OpenCV installation is not the intended CUDA detector environment. Selecting CUDA GPU 0 requires that the chosen environment can access CUDA; unavailable CUDA remains an explicit error rather than a claimed speed improvement.
+
+The Gtuner forwarding worker now prints three distinct startup milestones: UDP port bound (127.0.0.1:26740), GCV callbacks active, and valid app telemetry received. These identify whether a black Null Input screen is a running worker, a paused callback source, or a receiver without app traffic. Binding or receiving telemetry does not establish the Titan payload echo or console output.
+
+Validation includes injected persistent/transient replacement denial, preservation of the previous complete status file, temporary-file cleanup, capture continuing for all requested frames despite status lock failures, metadata-only watchdog progress without a JSON status file, and a Windows-only native file-sharing lock/recovery test. Native Windows and physical card/Titan/console behavior still require the Windows/hardware run.

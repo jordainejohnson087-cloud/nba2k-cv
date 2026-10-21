@@ -7,14 +7,26 @@ import queue
 import threading
 import socket
 import time
+import tempfile
 from pathlib import Path
 
 
-def atomic_write(path, content):
-    path = Path(path)
-    temp = path.with_suffix(path.suffix + '.tmp')
-    temp.write_bytes(content)
-    os.replace(temp, path)
+def atomic_write(path, content, retries=2):
+    """Unique staging files prevent writers colliding; readers see complete files."""
+    path=Path(path)
+    descriptor,temporary=tempfile.mkstemp(prefix=path.name+'.',suffix='.tmp',dir=path.parent)
+    try:
+        with os.fdopen(descriptor,'wb') as file:file.write(content)
+        for attempt in range(retries+1):
+            try:
+                os.replace(temporary,path)
+                return
+            except PermissionError:
+                if attempt>=retries:raise
+                time.sleep(.002*(attempt+1))
+    finally:
+        try:Path(temporary).unlink(missing_ok=True)
+        except OSError:pass
 
 
 def snapshot(out, payload, cv2=None, frame=None):

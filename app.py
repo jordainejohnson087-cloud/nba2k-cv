@@ -1308,6 +1308,15 @@ class Desktop(tk.Tk):
                 self.live_metrics.set(f"Capture {value['capture_fps']:.1f} FPS | AI stopped | card reports {value['reported_capture']['fps']:.1f} FPS")
         except (OSError,ValueError,KeyError):pass
 
+        # Status JSON may be locked on Windows while the frame publisher is healthy.
+        try:
+            monitor=getattr(self,'capture_monitor',None)
+            if monitor is None and (self.capture_out/'source_frames.bin').exists():
+                monitor=self.capture_monitor=RawMailbox(self.capture_out/'source_frames.bin')
+            progress=monitor.progress() if monitor else None
+            if progress and progress['frames']>getattr(self,'capture_progress_frames',0):
+                self.capture_progress_frames=progress['frames'];self.capture_progress_at=time.monotonic()
+        except (OSError,ValueError):pass
         process=self.capture_process
         if (process is not None and process.poll() is None and
                 not getattr(self,'capture_watchdog_fired',False) and
@@ -1355,9 +1364,9 @@ class Desktop(tk.Tk):
             data=json.loads(report.read_text(encoding="utf-8"))
             age=max(0,time.time()-data["timestamp"])
             self.capture_fps_label.set(f"{data['fps']:.1f}")
-            self.inference_label.set(f"{data['inference_ms']:.1f} ms")
+            self.inference_label.set(f"{data['inference_ms']:.1f} ms / {data.get('device','?')}")
             self.observation_label.set(data['status'].upper() if age<=1 else 'STALE')
-            self.live_metrics.set(f"Capture {data.get('capture_fps',0):.1f} FPS | AI {data['fps']:.1f} FPS | skipped {data.get('skipped_inference_frames',0)} | inference {data['inference_ms']:.1f} ms | "
+            self.live_metrics.set(f"Capture {data.get('capture_fps',0):.1f} FPS | AI {data['fps']:.1f} FPS | skipped {data.get('skipped_inference_frames',0)} | {data.get('device','unknown device')} inference {data['inference_ms']:.1f} ms | "
                 f"{data['status']} | preview age {age:.1f}s" + (" • STALE" if age>1 else ""))
             if 'green' in data:
                 measurement=data['green'];trigger=data.get('trigger',{})
@@ -1377,6 +1386,8 @@ class Desktop(tk.Tk):
         except (OSError,ValueError,KeyError,tk.TclError):pass
 
     def _close_raw_preview(self):
+        if getattr(self,'capture_monitor',None):
+            self.capture_monitor.close();self.capture_monitor=None
         if self.raw_preview is not None:
             self.raw_preview.close();self.raw_preview=None
         samples=getattr(self,'preview_timings',[])

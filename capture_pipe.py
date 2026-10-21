@@ -61,6 +61,17 @@ class RawMailbox:
         if first!=self.map[offset:offset+self.HEADER.size]:return None
         return dict(sequence=seq,width=w,height=h,timestamp=stamp,source_frame=source,bgr=data)
 
+    def progress(self):
+        """Read only publication metadata for watchdogs; never copy image pixels."""
+        seq=struct.unpack_from('<Q',self.map,16)[0]
+        if not seq:return None
+        offset=64+(seq%2)*(64+self.capacity)
+        header=self.map[offset:offset+self.HEADER.size]
+        actual,w,h,size,stamp,source=self.HEADER.unpack(header)
+        if actual!=seq or header!=self.map[offset:offset+self.HEADER.size]:return None
+        if not 0<w<=3840 or not 0<h<=2160 or size!=w*h*3 or size>self.capacity:return None
+        return dict(sequence=seq,frames=source+1,timestamp=stamp)
+
     def close(self):
         self.map.close();self.file.close()
 

@@ -163,6 +163,7 @@ def run(args, cv2, torch, YOLO):
         cap.release()
         raise RuntimeError('Selected environment cannot access CUDA. Run Check Setup or select Auto/CPU.')
     device = (0 if torch.cuda.is_available() else 'cpu') if requested_device == 'auto' else (0 if requested_device == '0' else 'cpu')
+    print(f'Detection runtime: device={device}, CUDA available={torch.cuda.is_available()}, input={args.imgsz}',flush=True)
     tracker = MeterTracker(Config(max_missed=args.max_missed))
     args.out.mkdir(parents=True, exist_ok=True)
     writer_video = None
@@ -433,6 +434,17 @@ def run(args, cv2, torch, YOLO):
 
 def run_capture_only(args,cv2):
     args.out.mkdir(parents=True,exist_ok=True)
+    status_failures=0;last_status_error=None
+    def publish_status(report):
+        nonlocal status_failures,last_status_error
+        report.update(status_write_failures=status_failures,last_status_write_error=last_status_error)
+        try:
+            # This is optional UI telemetry: never stall the card for a reader lock.
+            atomic_write(args.out/'capture_status.json',json.dumps(report).encode(),retries=0)
+            return True
+        except PermissionError as exc:
+            status_failures+=1;last_status_error=str(exc)
+            return False
     # Driver release can lag behind a stopped probe or closed video app.
     deadline=time.monotonic()+3
     while True:
@@ -445,15 +457,15 @@ def run_capture_only(args,cv2):
         except Exception as exc:
             if cap is not None:cap.release()
             error=str(exc)
-        atomic_write(args.out/'capture_status.json',json.dumps(dict(state='opening',timestamp=time.time(),frames=0,error=error,model_loaded=False)).encode())
+        publish_status(dict(state='opening',timestamp=time.time(),frames=0,error=error,model_loaded=False))
         if time.monotonic()>=deadline:
             report=dict(state='stopped',timestamp=time.time(),frames=0,error=error,model_loaded=False,stop_reason='capture_open_failed')
-            atomic_write(args.out/'capture_status.json',json.dumps(report).encode())
+            publish_status(report)
             atomic_write(args.out/'capture_run.json',json.dumps(report,indent=2).encode())
             raise RuntimeError(error)
         if args.stop_file and args.stop_file.exists():
             report=dict(state='stopped',timestamp=time.time(),frames=0,stop_reason='user_stopped',model_loaded=False,error=None)
-            atomic_write(args.out/'capture_status.json',json.dumps(report).encode())
+            publish_status(report)
             atomic_write(args.out/'capture_run.json',json.dumps(report).encode())
             return report
         time.sleep(.25)
@@ -463,7 +475,8 @@ def run_capture_only(args,cv2):
     def status(state):
         elapsed=max(.001,time.perf_counter()-start)
         return dict(state=state,timestamp=time.time(),frames=count,capture_fps=count/elapsed,
-                    reported_capture=mode,error=error,model_loaded=False)
+                    reported_capture=mode,error=error,model_loaded=False,
+                    status_write_failures=status_failures,last_status_write_error=last_status_error)
     try:
         mode=configure_capture(cv2,cap,args);cap.set(cv2.CAP_PROP_BUFFERSIZE,1)
         source=RawMailbox(args.out/'source_frames.bin',write=True,capacity=3840*2160*3)
@@ -498,7 +511,7 @@ def run_capture_only(args,cv2):
                 log.writerow(dict(frame=count,timestamp=stamp,read_ms=(now-before)*1000,read_interval_ms=interval))
                 count+=1;last=now
                 if now-last_status>=.1:
-                    atomic_write(args.out/'capture_status.json',json.dumps(status('capturing')).encode());last_status=now
+                    publish_status(status('capturing'));last_status=now
     except Exception as exc:error=str(exc);reason='capture_error'
     finally:
         cap.release()
@@ -506,7 +519,8 @@ def run_capture_only(args,cv2):
         if preview:preview.close()
         report=dict(status('stopped'),stop_reason=reason,
                     interval_p95_ms=sorted(intervals)[int(.95*(len(intervals)-1))] if intervals else None)
-        atomic_write(args.out/'capture_status.json',json.dumps(report).encode())
+        publish_status(report)
+        report.update(status_write_failures=status_failures,last_status_write_error=last_status_error)
         atomic_write(args.out/'capture_run.json',json.dumps(report,indent=2).encode())
     if error:raise RuntimeError(error)
     if reason=='source_ended_or_disconnected' and str(args.source).isdecimal():
