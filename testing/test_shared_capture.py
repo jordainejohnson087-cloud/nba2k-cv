@@ -24,6 +24,16 @@ class SeparateCaptureTests(unittest.TestCase):
         with patch.object(sys,'argv',['run_live.py','--capture-only']),patch('builtins.__import__',side_effect=guarded),patch.object(run_live,'run_capture_only') as capture:
             run_live.main();capture.assert_called_once()
 
+    def test_bridge_host_cli_never_imports_cv_or_gpu(self):
+        import builtins
+        original=builtins.__import__
+        def guarded(name,*args,**kwargs):
+            if name in ('torch','ultralytics','cv2'):raise AssertionError('Bridge must remain model-free')
+            return original(name,*args,**kwargs)
+        argv=['run_live.py','--bridge-host','private.json','--bridge-lease','owner.lease','--bridge-port','26740']
+        with patch.object(sys,'argv',argv),patch('builtins.__import__',side_effect=guarded),patch.object(run_live,'run_bridge_host') as host:
+            run_live.main();host.assert_called_once()
+
     def test_detector_uses_existing_capture_and_releasing_it_keeps_card_running(self):
         class Card:
             def __init__(self):self.count=0;self.released=False

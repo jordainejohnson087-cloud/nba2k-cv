@@ -7,6 +7,10 @@ import http.server
 import json
 import math
 import os
+import queue
+import shutil
+import subprocess
+import tempfile
 import secrets
 import socket
 import threading
@@ -14,6 +18,17 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 from live_link import BridgeClient
+
+
+def write_private_config(path,info):
+    path=Path(path)
+    descriptor,temporary=tempfile.mkstemp(prefix='.bridge-',dir=path.parent)
+    try:
+        with os.fdopen(descriptor,'w',encoding='utf-8') as file:json.dump(info,file)
+        os.replace(temporary,path)
+    finally:
+        try:Path(temporary).unlink(missing_ok=True)
+        except OSError:pass
 
 
 def neutral_bridge_state():
@@ -78,6 +93,19 @@ class BridgeService:
                     body=json.loads(self.rfile.read(size))
                     if self.path=='/state':
                         owner.submit(body['state'],body['captured_at'])
+                    elif self.path=='/configure':
+                        if set(body)-{'enabled','expected_slot','allowed'}:raise ValueError('Unknown setting')
+                        for key in ('enabled','allowed'):
+                            if key in body and type(body[key]) is not bool:raise ValueError('Invalid boolean')
+                        settings={key:body[key] for key in ('enabled','expected_slot') if key in body}
+                        owner.configure(**settings)
+                        if 'allowed' in body:owner.allow_output(body['allowed'])
+                    elif self.path=='/verify':
+                        timeout=body.get('timeout',1)
+                        if type(timeout) not in (int,float) or not 0<timeout<=3:raise ValueError('Invalid verify timeout')
+                        slot=body.get('expected_slot')
+                        if slot is not None and (type(slot) is not int or not 1<=slot<=9):raise ValueError('Invalid slot')
+                        self.reply(200,owner.verify(timeout,slot));return
                     elif self.path=='/clear':owner.clear()
                     else:self.reply(404,{'error':'Unknown endpoint'});return
                     self.reply(200,owner.status())
@@ -130,7 +158,7 @@ class BridgeService:
 
     def _send(self):
         while not self.stopped.is_set():
-            self.wake.wait(.05);self.wake.clear()
+            self.wake.wait(.005);self.wake.clear()
             with self.lock:
                 latest=self.latest;enabled=self.enabled;allowed=self.output_allowed
             state=neutral_bridge_state();stamp=time.time()
@@ -161,10 +189,7 @@ class BridgeService:
         return dict(self.status(),ready=False)
 
     def write_config(self,path):
-        path=Path(path)
-        descriptor=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
-        with os.fdopen(descriptor,'w',encoding='utf-8') as file:
-            json.dump(dict(url=self.url,token=self.token),file)
+        write_private_config(path,dict(url=self.url,token=self.token))
 
     def close(self):
         if self.stopped.is_set():return
@@ -213,3 +238,182 @@ class BridgeServiceClient:
     def close(self):
         self._request('POST','/clear',{})
         if self.connection:self.connection.close();self.connection=None
+
+
+def run_bridge_host(config,lease,port=26740):
+    """A model-free bridge process; exit if the supervising app disappears."""
+    service=BridgeService(port)
+    try:
+        service.write_config(config)
+        while True:
+            try:
+                if time.time()-Path(lease).stat().st_mtime>3:break
+            except OSError:break
+            time.sleep(.1)
+    finally:service.close()
+
+
+def unavailable_bridge(reason):
+    return dict(receiver='unavailable',hardware='not verified',ready=False,active_slot=None,
+                device_sequence=None,device_event=None,rtt_ms=None,stage=reason)
+
+
+class BridgeProcess:
+    """UI supervisor. All socket requests run on its control thread, never Tk."""
+    def __init__(self,executable,runtime,port=26740):
+        self.folder=Path(tempfile.mkdtemp(prefix='nba2k-bridge-'))
+        self.config=self.folder/'api.json';self.lease=self.folder/'owner.lease';self.lease.touch()
+        self.commands=queue.Queue();self.stopped=threading.Event();self.lock=threading.Lock()
+        self.cached=unavailable_bridge('Bridge process starting');self.updated=0
+        self.process=None;self.thread=None;self.heartbeat=None
+        try:
+            self.process=subprocess.Popen([str(executable),str(runtime),'--bridge-host',str(self.config),
+                '--bridge-lease',str(self.lease),'--bridge-port',str(port)],
+                stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0) if os.name=='nt' else 0)
+            self.heartbeat=threading.Thread(target=self._heartbeat,daemon=True);self.heartbeat.start()
+            self.thread=threading.Thread(target=self._control,daemon=True);self.thread.start()
+        except Exception:
+            shutil.rmtree(self.folder,ignore_errors=True);raise
+
+    def _rpc(self,path,body=None,timeout=.4):
+        info=json.loads(self.config.read_text())
+        address=urlparse(info['url'])
+        if address.scheme!='http' or address.hostname!='127.0.0.1' or not address.port:raise ValueError('Invalid bridge address')
+        connection=http.client.HTTPConnection('127.0.0.1',address.port,timeout=timeout)
+        try:
+            connection.request('GET' if body is None else 'POST',path,
+                None if body is None else json.dumps(body),
+                headers={'Authorization':'Bearer '+info['token'],'Content-Type':'application/json'})
+            response=connection.getresponse();data=response.read(16385)
+            if response.status!=200 or len(data)>16384:raise ValueError('Bridge request rejected')
+            return json.loads(data)
+        finally:connection.close()
+
+    def _heartbeat(self):
+        while not self.stopped.is_set():
+            try:self.lease.touch()
+            except OSError:break
+            self.stopped.wait(.2)
+
+    def _control(self):
+        pending=None
+        while not self.stopped.is_set():
+            try:
+                if self.process.poll() is not None:raise OSError('Bridge process exited; reconnect to restart it')
+                if not self.config.exists():self.stopped.wait(.02);continue
+                if pending is None:
+                    try:pending=self.commands.get_nowait()
+                    except queue.Empty:pass
+                if pending:
+                    path,body,event,answer=pending
+                    value=self._rpc(path,body,body.get('timeout',0)+.5 if path=='/verify' else .4)
+                    if answer is not None:answer.update(value)
+                    if event:event.set()
+                    pending=None
+                else:value=self._rpc('/status')
+                with self.lock:self.cached=value;self.updated=time.monotonic()
+            except (OSError,ValueError,http.client.HTTPException) as exc:
+                with self.lock:self.cached=unavailable_bridge(str(exc));self.updated=time.monotonic()
+                # Never replay control actions following an uncertain transport result.
+                if pending:
+                    if pending[3] is not None:pending[3].update(self.status())
+                    if pending[2]:pending[2].set()
+                    pending=None
+            self.stopped.wait(.02)
+
+    def status(self):
+        with self.lock:
+            if self.process.poll() is not None:return unavailable_bridge('Bridge process exited; reconnect to restart it')
+            if time.monotonic()-self.updated>.5:return unavailable_bridge('Bridge process starting or status stale')
+            return dict(self.cached)
+
+    def _enqueue(self,path,body):
+        if self.stopped.is_set():return
+        self.commands.put((path,body,None,None))
+
+    def configure(self,enabled=None,expected_slot=_KEEP_EXPECTED_SLOT):
+        body={}
+        if enabled is not None:
+            if type(enabled) is not bool:raise ValueError('Invalid enabled value')
+            body['enabled']=enabled
+        if expected_slot is not _KEEP_EXPECTED_SLOT:
+            if expected_slot is not None and (type(expected_slot) is not int or not 1<=expected_slot<=9):raise ValueError('Invalid slot')
+            body['expected_slot']=expected_slot
+        self._enqueue('/configure',body)
+
+    def allow_output(self,allowed):
+        if type(allowed) is not bool:raise ValueError('Invalid output setting')
+        self._enqueue('/configure',dict(allowed=allowed))
+
+    def clear(self):self._enqueue('/clear',{})
+
+    def verify(self,timeout=3,expected_slot=None):
+        if not 0<timeout<=3:raise ValueError('Invalid timeout')
+        event=threading.Event();answer={}
+        self.commands.put(('/verify',dict(timeout=timeout,expected_slot=expected_slot),event,answer))
+        if not event.wait(timeout+1):return dict(self.status(),ready=False)
+        return answer
+
+    def write_config(self,path):
+        # Only called when AI starts; never expose the controller token in a UI log.
+        if not self.config.exists():raise OSError('Bridge process has not started; reconnect first')
+        info=json.loads(self.config.read_text())
+        write_private_config(path,info)
+
+    def close(self):
+        if self.stopped.is_set():return
+        self.stopped.set()
+        if self.heartbeat:self.heartbeat.join(timeout=.3)
+        try:self.lease.unlink(missing_ok=True)
+        except OSError:pass
+        if self.thread:self.thread.join(timeout=.6)
+        if self.process:
+            try:self.process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                self.process.terminate()
+                try:self.process.wait(timeout=1)
+                except subprocess.TimeoutExpired:self.process.kill();self.process.wait(timeout=1)
+        shutil.rmtree(self.folder,ignore_errors=True)
+
+
+class AsyncBridgeServiceClient:
+    """Detection never waits for a USB host or an HTTP timeout."""
+    def __init__(self,config):
+        self.config=config;self.lock=threading.Lock();self.latest=None
+        self.cached=unavailable_bridge('Bridge client starting');self.updated=0
+        self.stop=threading.Event();self.wake=threading.Event()
+        self.thread=threading.Thread(target=self._run,daemon=True);self.thread.start()
+
+    def status(self):
+        with self.lock:
+            if time.monotonic()-self.updated>.75:return unavailable_bridge('Bridge API status stale')
+            return dict(self.cached)
+
+    def send(self,state,observed_at=None):
+        stamp=time.time() if observed_at is None else observed_at
+        validate_bridge_state(state,stamp)
+        with self.lock:self.latest=(json.loads(json.dumps(state,allow_nan=False)),stamp)
+        self.wake.set();return self.status()
+
+    def _run(self):
+        client=None;signature=None
+        try:
+            while not self.stop.is_set():
+                try:
+                    info=Path(self.config).stat();current=(info.st_mtime_ns,info.st_size)
+                    if client is None or current!=signature:
+                        if client:client.close()
+                        client=BridgeServiceClient(self.config);signature=current
+                    self.wake.wait(.05);self.wake.clear()
+                    with self.lock:item=self.latest;self.latest=None
+                    value=client.send(item[0],item[1]) if item else client._request('GET','/status')
+                    with self.lock:self.cached=value;self.updated=time.monotonic()
+                except (OSError,ValueError) as exc:
+                    with self.lock:self.cached=unavailable_bridge(str(exc));self.updated=time.monotonic()
+                    self.stop.wait(.1)
+        finally:
+            if client:client.close()
+
+    def close(self):
+        self.stop.set();self.wake.set();self.thread.join(timeout=.7)

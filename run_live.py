@@ -15,7 +15,7 @@ from run_video import estimate_fill
 from live_link import BridgeClient, SnapshotPublisher, atomic_write
 from titan_control import GtunerController, slot_number, choose_meter_slot, discover_gtuner, valid_gtuner_path, launch_gtuner_background, titan_hardware_inventory
 from capture_pipe import LatestCapture, RawMailbox, SharedCapture, CaptureLease, OwnedCapture
-from bridge_service import BridgeService, BridgeServiceClient
+from bridge_service import BridgeService, BridgeServiceClient, BridgeProcess, run_bridge_host, AsyncBridgeServiceClient
 from meter_green import GreenGate, green_config, measure_green
 
 
@@ -177,7 +177,7 @@ def run(args, cv2, torch, YOLO):
     missing_reads = 0
     reason = 'stopped'
     service_config=getattr(args,'bridge_service',None)
-    bridge = (BridgeServiceClient(service_config) if service_config else
+    bridge = (AsyncBridgeServiceClient(service_config) if service_config else
               BridgeClient(args.bridge_port) if getattr(args, 'bridge_port', 0) else None)
     bridge_status = None
     ui_enabled = getattr(args, 'ui_preview', False)
@@ -517,6 +517,8 @@ def run_capture_only(args,cv2):
 def main():
     p = argparse.ArgumentParser(description='Preview and measure live NBA 2K meter detection')
     p.add_argument('--model',type=Path,help='Trained model; not needed for --probe-only')
+    p.add_argument('--bridge-host',type=Path,help='Run only the independent bridge host')
+    p.add_argument('--bridge-lease',type=Path,help='Supervising app heartbeat file')
     p.add_argument('--capture-only',action='store_true',help='View the card without loading AI or a controller bridge')
     p.add_argument('--capture-session',type=Path,help='Read an existing capture owner session; never reopen the card')
     p.add_argument('--bridge-service',type=Path,help='Private local bridge API configuration')
@@ -553,6 +555,10 @@ def main():
     p.add_argument('--record-raw',action='store_true',help='Save unannotated observed frames and an automatic review queue for learning')
     p.add_argument('--dshow',action='store_true',help='Use DirectShow for a Windows camera index')
     args = p.parse_args()
+    if args.bridge_host:
+        if not args.bridge_lease or not 1<=args.bridge_port<=65535:p.error('Bridge host needs a lease and valid port')
+        run_bridge_host(args.bridge_host,args.bridge_lease,args.bridge_port)
+        return
     args.ui_status = args.ui_status or args.ui_preview
     if not 0 <= args.bridge_port <= 65535:
         p.error('Invalid bridge port')

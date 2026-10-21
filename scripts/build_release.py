@@ -31,7 +31,7 @@ def build(archive, repository):
     live = files['run_live.py'].decode('utf-8')
     live = live.replace('from live_link import BridgeClient, SnapshotPublisher, atomic_write',
                         (ROOT/'live_link.py').read_text(encoding='utf-8'))
-    live = live.replace('from bridge_service import BridgeService, BridgeServiceClient',
+    live = live.replace('from bridge_service import BridgeService, BridgeServiceClient, BridgeProcess, run_bridge_host, AsyncBridgeServiceClient',
                         (ROOT/'bridge_service.py').read_text(encoding='utf-8').replace('from live_link import BridgeClient',''))
     live = live.replace('from capture_pipe import LatestCapture, RawMailbox, SharedCapture, CaptureLease, OwnedCapture',
                         (ROOT/'capture_pipe.py').read_text(encoding='utf-8'))

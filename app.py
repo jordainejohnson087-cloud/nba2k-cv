@@ -14,7 +14,7 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 from app_update import (apply_update, configured_feed, current_version,
                         download_release, fetch_manifest, newest_download)
 from app_model import import_model, managed_model, model_catalog
-from run_live import green_config, RawMailbox, GtunerController, slot_number, choose_meter_slot, discover_gtuner, valid_gtuner_path, launch_gtuner_background, BridgeService, titan_hardware_inventory
+from run_live import green_config, RawMailbox, GtunerController, slot_number, choose_meter_slot, discover_gtuner, valid_gtuner_path, launch_gtuner_background, BridgeProcess, titan_hardware_inventory
 
 
 PROJECT=Path(__file__).resolve().parent
@@ -135,8 +135,8 @@ class Desktop(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(f'NBA 2K Meter CV  •  {current_version(PROJECT)}')
-        self.geometry(f'{min(1280,max(1000,self.winfo_screenwidth()-24))}x{min(900,max(600,self.winfo_screenheight()-120))}+0+0')
-        self.minsize(1000,600)
+        self.geometry(f'{min(1800,max(1180,self.winfo_screenwidth()-24))}x{min(900,max(600,self.winfo_screenheight()-120))}+0+0')
+        self.minsize(1180,600)
         self._theme()
         self.process=None
         self.process_out=None
@@ -211,6 +211,8 @@ class Desktop(tk.Tk):
         self.bridge_setup_status=tk.StringVar(value='Not checked — install the script in Gtuner once')
         self.titan_usb_status=tk.StringVar(value='Checking Windows for Titan Two USB hardware...')
         self.bridge_status=tk.StringVar(value='Bridge off • Titan Two hardware not verified')
+        self.bridge_next_step=tk.StringVar(value='Use Gtuner as the Titan host. Disconnect the Helios bridge before testing this backend.')
+        self.component_status=tk.StringVar(value='Capture: stopped\nEngine: stopped\nModel: selectable weight\nBridge: starting independently')
         self.live_metrics=tk.StringVar(value='Preview idle')
         try:green=green_config(saved.get('green',{}))
         except ValueError:green=green_config()
@@ -229,7 +231,7 @@ class Desktop(tk.Tk):
         self.update_notice=None
         self._build()
         try:
-            self.bridge_service=BridgeService()
+            self.bridge_service=BridgeProcess(sys.executable,PROJECT/'run_live.py')
             self.bridge_service.configure(enabled=self.bridge_enabled.get())
         except OSError as exc:self.bridge_setup_status.set('Local bridge service unavailable: '+str(exc))
         self.after(100,self._poll)
@@ -241,42 +243,42 @@ class Desktop(tk.Tk):
         self.protocol('WM_DELETE_WINDOW',self._close)
 
     def _theme(self):
-        self.configure(background='#0b1118')
+        self.configure(background='#202124')
         style=ttk.Style(self)
         style.theme_use('clam')
-        style.configure('.',font=('Segoe UI',10),background='#0b1118',foreground='#e6edf5')
-        style.configure('TFrame',background='#0b1118')
-        style.configure('Card.TFrame',background='#131e2b')
-        style.configure('TLabel',background='#0b1118',foreground='#e6edf5')
-        style.configure('Card.TLabel',background='#131e2b',foreground='#e6edf5')
+        style.configure('.',font=('Segoe UI',10),background='#202124',foreground='#e6edf5')
+        style.configure('TFrame',background='#202124')
+        style.configure('Card.TFrame',background='#2b2d31')
+        style.configure('TLabel',background='#202124',foreground='#e6edf5')
+        style.configure('Card.TLabel',background='#2b2d31',foreground='#e6edf5')
         style.configure('Muted.TLabel',foreground='#9aabbf')
-        style.configure('CardMuted.TLabel',background='#131e2b',foreground='#9aabbf')
+        style.configure('CardMuted.TLabel',background='#2b2d31',foreground='#9aabbf')
         style.configure('Brand.TLabel',font=('Segoe UI',22,'bold'))
-        style.configure('Section.TLabel',font=('Segoe UI',11,'bold'),background='#131e2b')
-        style.configure('Metric.TLabel',font=('Segoe UI',23,'bold'),background='#131e2b',foreground='#55ddbc')
-        style.configure('Video.TLabel',background='#080d13',foreground='#8798aa',font=('Segoe UI',12))
+        style.configure('Section.TLabel',font=('Segoe UI',11,'bold'),background='#2b2d31')
+        style.configure('Metric.TLabel',font=('Segoe UI',23,'bold'),background='#2b2d31',foreground='#00d5df')
+        style.configure('Video.TLabel',background='#111214',foreground='#8798aa',font=('Segoe UI',12))
         style.configure('TButton',background='#203044',foreground='#e6edf5',padding=(12,8),borderwidth=0)
         style.map('TButton',background=[('active','#2c425b')],foreground=[('disabled','#677689')])
-        style.configure('Accent.TButton',background='#52ddba',foreground='#07231c',font=('Segoe UI',10,'bold'))
+        style.configure('Accent.TButton',background='#00cbd6',foreground='#082225',font=('Segoe UI',10,'bold'))
         style.map('Accent.TButton',background=[('active','#80eed1')],foreground=[('disabled','#677689')])
         style.configure('Stop.TButton',background='#4e2634',foreground='#ffb5c3')
-        style.configure('TEntry',bordercolor='#30465c',lightcolor='#30465c',darkcolor='#30465c',fieldbackground='#1a293a',foreground='#e6edf5',insertcolor='#e6edf5',padding=6)
-        style.configure('TCombobox',bordercolor='#30465c',lightcolor='#30465c',darkcolor='#30465c',arrowcolor='#abc1d6',fieldbackground='#1a293a',foreground='#e6edf5',background='#24364b',padding=6)
-        style.map('TCombobox',fieldbackground=[('readonly','#1a293a')],foreground=[('readonly','#e6edf5')],
-                  selectbackground=[('readonly','#1a293a')],selectforeground=[('readonly','#e6edf5')])
-        style.configure('TCheckbutton',background='#131e2b',foreground='#e6edf5',padding=(0,4))
-        style.map('TCheckbutton',background=[('active','#131e2b')])
-        style.configure('TNotebook',background='#0b1118',borderwidth=0,bordercolor='#0b1118',lightcolor='#0b1118',darkcolor='#0b1118')
-        style.configure('TNotebook.Tab',bordercolor='#263c51',lightcolor='#263c51',darkcolor='#263c51',background='#142131',foreground='#a5b6c8',padding=(18,11))
-        style.map('TNotebook.Tab',background=[('selected','#22384a')],foreground=[('selected','#61e5c5')])
-        style.configure('TLabelframe',background='#131e2b',bordercolor='#2a3b4f',padding=12)
-        style.configure('TLabelframe.Label',background='#131e2b',foreground='#61e5c5')
-        style.configure('Vertical.TScrollbar',background='#263c51',troughcolor='#0b1118',bordercolor='#0b1118',arrowcolor='#abc1d6',lightcolor='#263c51',darkcolor='#263c51')
+        style.configure('TEntry',bordercolor='#30465c',lightcolor='#30465c',darkcolor='#30465c',fieldbackground='#25262a',foreground='#e6edf5',insertcolor='#e6edf5',padding=6)
+        style.configure('TCombobox',bordercolor='#30465c',lightcolor='#30465c',darkcolor='#30465c',arrowcolor='#abc1d6',fieldbackground='#25262a',foreground='#e6edf5',background='#24364b',padding=6)
+        style.map('TCombobox',fieldbackground=[('readonly','#25262a')],foreground=[('readonly','#e6edf5')],
+                  selectbackground=[('readonly','#25262a')],selectforeground=[('readonly','#e6edf5')])
+        style.configure('TCheckbutton',background='#2b2d31',foreground='#e6edf5',padding=(0,4))
+        style.map('TCheckbutton',background=[('active','#2b2d31')])
+        style.configure('TNotebook',background='#202124',borderwidth=0,bordercolor='#202124',lightcolor='#202124',darkcolor='#202124')
+        style.configure('TNotebook.Tab',bordercolor='#263c51',lightcolor='#263c51',darkcolor='#263c51',background='#282a2e',foreground='#a5b6c8',padding=(18,11))
+        style.map('TNotebook.Tab',background=[('selected','#22384a')],foreground=[('selected','#00d5df')])
+        style.configure('TLabelframe',background='#2b2d31',bordercolor='#2a3b4f',padding=12)
+        style.configure('TLabelframe.Label',background='#2b2d31',foreground='#00d5df')
+        style.configure('Vertical.TScrollbar',background='#263c51',troughcolor='#202124',bordercolor='#202124',arrowcolor='#abc1d6',lightcolor='#263c51',darkcolor='#263c51')
         style.map('Vertical.TScrollbar',background=[('active','#35536f')])
-        style.configure('Treeview',background='#131e2b',fieldbackground='#131e2b',foreground='#e6edf5',rowheight=34,borderwidth=0)
+        style.configure('Treeview',background='#2b2d31',fieldbackground='#2b2d31',foreground='#e6edf5',rowheight=34,borderwidth=0)
         style.configure('Treeview.Heading',background='#203044',foreground='#b8c7d7',padding=8)
         style.map('Treeview',background=[('selected','#235448')],foreground=[('selected','#ffffff')])
-        self.option_add('*TCombobox*Listbox.background','#1a293a')
+        self.option_add('*TCombobox*Listbox.background','#25262a')
         self.option_add('*TCombobox*Listbox.foreground','#e6edf5')
         self.option_add('*TCombobox*Listbox.selectBackground','#235448')
 
@@ -290,7 +292,7 @@ class Desktop(tk.Tk):
         outer=ttk.Frame(parent,width=width)
         outer.grid_propagate(False)
         outer.columnconfigure(0,weight=1);outer.rowconfigure(0,weight=1)
-        canvas=tk.Canvas(outer,background='#0b1118',highlightthickness=0,width=width)
+        canvas=tk.Canvas(outer,background='#202124',highlightthickness=0,width=width)
         canvas.grid(row=0,column=0,sticky='nsew')
         bar=ttk.Scrollbar(outer,orient='vertical',command=canvas.yview)
         bar.grid(row=0,column=1,sticky='ns');canvas.configure(yscrollcommand=bar.set)
@@ -324,16 +326,16 @@ class Desktop(tk.Tk):
         self.banner_install.pack(side='right')
         self.tabs=ttk.Notebook(self);self.tabs.pack(fill='both',expand=True,padx=18,pady=(0,12))
         live=ttk.Frame(self.tabs,padding=(0,16,0,0));self.tabs.add(live,text='Live Detection')
-        live.columnconfigure(0,weight=0,minsize=350);live.columnconfigure(1,weight=1)
+        live.columnconfigure(0,weight=0,minsize=285);live.columnconfigure(1,weight=1);live.columnconfigure(2,weight=0,minsize=285)
         live.rowconfigure(0,weight=1)
-        sidebar,controls=self._scroll_panel(live)
+        sidebar,controls=self._scroll_panel(live,width=285)
         sidebar.grid(row=0,column=0,sticky='nsew',padx=(0,14))
         detector=self._card(controls,'01   DETECTOR')
         ttk.Label(detector,text='Trained weight',style='CardMuted.TLabel').pack(anchor='w')
         self.model_menu=ttk.Combobox(detector,textvariable=self.model_choice,state='readonly',width=26)
         self.model_menu.pack(fill='x',pady=(5,7))
         self.model_menu.bind('<<ComboboxSelected>>',self._select_model)
-        ttk.Label(detector,textvariable=self.model_detail,style='CardMuted.TLabel',wraplength=280).pack(anchor='w',pady=4)
+        ttk.Label(detector,textvariable=self.model_detail,style='CardMuted.TLabel',wraplength=235).pack(anchor='w',pady=4)
         choose=ttk.Frame(detector,style='Card.TFrame');choose.pack(fill='x',pady=6)
         ttk.Button(choose,text='Add weight',command=self._choose_model).pack(side='left')
         ttk.Button(choose,text='Find models',command=self._auto_find).pack(side='left',padx=6)
@@ -401,11 +403,33 @@ class Desktop(tk.Tk):
         ttk.Label(video,text='LIVE CAPTURE',style='Section.TLabel').grid(row=0,column=0,sticky='w',pady=(0,10))
         self.screen=ttk.Label(video,text='Start Capture to view your console.\n\nStart AI Detection separately when you are ready.',style='Video.TLabel',anchor='center')
         self.screen.grid(row=1,column=0,sticky='nsew')
-        ttk.Label(video,textvariable=self.display_metrics,style='CardMuted.TLabel').grid(row=3,column=0,sticky='w',pady=(0,4))
+        ttk.Label(video,textvariable=self.display_metrics,style='CardMuted.TLabel',wraplength=520).grid(row=3,column=0,sticky='w',pady=(0,4))
         ttk.Label(video,textvariable=self.live_metrics,style='CardMuted.TLabel',wraplength=650).grid(row=2,column=0,sticky='w',pady=(10,0))
         ttk.Label(work,textvariable=self.bridge_status,style='Muted.TLabel',wraplength=700).grid(row=3,column=0,sticky='w',pady=10)
         self.log=scrolledtext.ScrolledText(work,height=4,state='disabled',background='#0b141f',foreground='#9eb4ca',insertbackground='#e6edf5',relief='flat',font=('Consolas',9))
         self.log.grid(row=4,column=0,sticky='ew')
+        bridge_sidebar,bridge_controls=self._scroll_panel(live,width=285)
+        bridge_sidebar.grid(row=0,column=2,sticky='nsew',padx=(14,0))
+        device_card=self._card(bridge_controls,'TITAN BRIDGE')
+        ttk.Label(device_card,text='Backend: Gtuner IV',style='Card.TLabel').pack(anchor='w')
+        ttk.Label(device_card,textvariable=self.titan_usb_status,style='CardMuted.TLabel',wraplength=235).pack(anchor='w',pady=8)
+        ttk.Button(device_card,text='Connect / Reconnect',style='Accent.TButton',command=self._connect_bridge).pack(fill='x',pady=4)
+        ttk.Button(device_card,text='Disconnect bridge',command=self._disconnect_bridge).pack(fill='x',pady=4)
+        ttk.Button(device_card,text='Scan USB',command=self._scan_titan_hardware).pack(fill='x',pady=4)
+        ttk.Label(device_card,textvariable=self.bridge_status,style='CardMuted.TLabel',wraplength=235).pack(anchor='w',pady=8)
+        ttk.Label(device_card,textvariable=self.bridge_next_step,style='CardMuted.TLabel',wraplength=235).pack(anchor='w',pady=8)
+        slots_card=self._card(bridge_controls,'MEMORY SLOTS')
+        ttk.Combobox(slots_card,textvariable=self.titan_slot,values=('Auto (meter bridge)',*tuple(str(i) for i in range(1,10))),state='readonly',width=21).pack(fill='x',pady=4)
+        ttk.Button(slots_card,text='Select & verify slot',command=self._bridge_slot_changed).pack(fill='x',pady=4)
+        self.live_slots=ttk.Treeview(slots_card,columns=('label',),show='tree headings',height=5)
+        self.live_slots.heading('#0',text='Slot');self.live_slots.column('#0',width=40,stretch=False)
+        self.live_slots.heading('label',text='Gtuner script');self.live_slots.column('label',width=170)
+        for i in range(1,10):self.live_slots.insert('','end',iid=str(i),text=str(i),values=('Not read',))
+        self.live_slots.pack(fill='x',pady=6)
+        ttk.Label(slots_card,text='Names require Gtuner access. Console output remains unverified.',style='CardMuted.TLabel',wraplength=235).pack(anchor='w')
+        ttk.Button(slots_card,text='Full bridge setup',command=lambda:self.tabs.select(self.bridge_tab)).pack(fill='x',pady=8)
+        components=self._card(bridge_controls,'INDEPENDENT COMPONENTS')
+        ttk.Label(components,textvariable=self.component_status,style='CardMuted.TLabel',wraplength=235).pack(anchor='w')
         models=ttk.Frame(self.tabs,padding=20);self.tabs.add(models,text='Models')
         ttk.Label(models,text='Your model library',style='Brand.TLabel').pack(anchor='w')
         ttk.Label(models,text='Choose a real .pt weight. Input size is selected separately in Live Detection.',style='Muted.TLabel').pack(anchor='w',pady=(6,16))
@@ -447,7 +471,7 @@ class Desktop(tk.Tk):
         self.bridge_pages.add(calibration_page,text='Detection calibration')
         ttk.Label(setup_page,text='FIRST CONNECTION',font=('Segoe UI',11,'bold')).pack(anchor='w',pady=6)
         for instruction in (
-            '1. Connect PROG to this PC, OUTPUT to the console, and the controller to INPUT-A.',
+            '1. Disconnect the Titan bridge in Helios or other USB hosts first. Connect PROG to this PC, OUTPUT to the console, and the controller to INPUT-A.',
             '2. Open Bridge Files. Install titan_meter.gpc into an unused slot using Gtuner IV.',
             '3. In Gtuner, enable Recall loaded memory slot between power cycles.',
             '4. Start gtuner_meter.py in Gtuner Computer Vision with a Null source. Leave the capture card for this app.',
@@ -643,6 +667,12 @@ class Desktop(tk.Tk):
         self.gtuner_launched=True
 
     def _connect_bridge(self):
+        service=getattr(self,'bridge_service',None)
+        if service is None or (hasattr(service,'process') and service.process.poll() is not None):
+            if service:service.close()
+            try:self.bridge_service=BridgeProcess(sys.executable,PROJECT/'run_live.py')
+            except OSError as exc:
+                self.bridge_setup_status.set('Bridge restart failed: '+str(exc));return
         inventory=getattr(self,'hardware_inventory',{})
         if inventory.get('auto_connect'):self.hardware_autoconnect_id=inventory['devices'][0]['id']
         self.bridge_enabled.set(True);self.trigger_armed.set(False)
@@ -665,6 +695,7 @@ class Desktop(tk.Tk):
             current=self.slot_table.item(str(i),'values')
             label=name or (current[0] if current and slots is None else 'Unavailable — Gtuner did not expose a label')
             self.slot_table.item(str(i),values=(label,'Active — heartbeat verified' if active==i else 'Not verified'))
+            if hasattr(self,'live_slots'):self.live_slots.item(str(i),text=('● ' if active==i else '')+str(i),values=(label,))
 
     def _retry_bridge(self):
         if self.pending_reconnect and not self.preparing_bridge:
@@ -1063,12 +1094,16 @@ class Desktop(tk.Tk):
         cmd += ['--green-settings',str(out/'green_settings.json')]
         cmd += ['--headless','--ui-status','--device',self.compute.get(),'--stop-file',str(out/'stop.request')]
         cmd += ['--capture-session',str(self.capture_out)]
-        if self.bridge_enabled.get() and self.bridge_service:
-            self.bridge_service.configure(enabled=True,expected_slot=Desktop._desired_bridge_slot(self))
-            config=out/'bridge_service.json';self.bridge_service.write_config(config)
-            cmd += ['--bridge-service',str(config)]
-            active=getattr(self,'verified_titan_slot',None)
-            if active:cmd += ['--expected-slot',str(active)]
+        config=out/'bridge_service.json'
+        # Keep the SDK attached even while disabled, so bridge reconnect is independent of AI.
+        cmd += ['--bridge-service',str(config)]
+        if self.bridge_service:
+            self.bridge_service.configure(enabled=self.bridge_enabled.get(),expected_slot=Desktop._desired_bridge_slot(self))
+            try:
+                self.bridge_service.write_config(config)
+                self.bridge_config_host=id(self.bridge_service)
+            except OSError as exc:self.bridge_setup_status.set('AI running; bridge client waiting for host: '+str(exc))
+        # Slot policy is enforced by the bridge host and can change without restarting AI.
         (out/'app_profile.json').write_text(json.dumps(dict(environment=executable,
             compute=self.compute.get(),controller=self.controller.get(),model=str(model))),encoding='utf-8')
         self.live_active=True
@@ -1252,6 +1287,11 @@ class Desktop(tk.Tk):
                     self._refresh()
         except queue.Empty:pass
         self._capture_tick()
+        if hasattr(self,'component_status'):
+            def health(process):
+                return ('running / PID '+str(getattr(process,'pid','—'))) if process and process.poll() is None else 'stopped'
+            bridge=getattr(self,'bridge_service',None)
+            self.component_status.set('Capture: '+health(self.capture_process)+'\nEngine: '+health(self.process if self.live_active else None)+'\nModel: '+Path(self.model.get()).name+'\nBridge: '+health(getattr(bridge,'process',None)))
         self._bridge_tick()
         self._preview_tick()
         self.after(100,self._poll)
@@ -1285,10 +1325,22 @@ class Desktop(tk.Tk):
     def _bridge_tick(self):
         if self.bridge_service is None or time.monotonic()-self.bridge_tick_at<.5:return
         self.bridge_tick_at=time.monotonic();value=self.bridge_service.status()
+        if (self.live_active and self.active_out and hasattr(self.bridge_service,'config')
+                and self.bridge_service.config.exists() and getattr(self,'bridge_config_host',None)!=id(self.bridge_service)):
+            try:
+                self.bridge_service.write_config(self.active_out/'bridge_service.json')
+                self.bridge_config_host=id(self.bridge_service)
+            except OSError:pass
         self._show_slots(None,value.get('active_slot') if value['ready'] else None)
         summary=('Bridge disabled • ' if not self.bridge_enabled.get() else '')+value['stage']
         if value.get('rtt_ms') is not None:summary+=f" | CV acknowledgments {value.get('acknowledged',0)} | RTT {value['rtt_ms']:.1f} ms"
         self.bridge_status.set(summary)
+        if hasattr(self,'bridge_next_step'):
+            if value['ready']:next_step='Transport verified. Test console input separately in an offline practice session; console output is unverified.'
+            elif value.get('receiver')!='receiving':next_step='Next: start gtuner_meter.py in Gtuner Computer Vision with Null Video Input. Check its Python/OpenCV indicators. Disconnect other Titan hosts first.'
+            elif 'slot' in value['stage'].lower():next_step='Next: select the slot containing the matching titan_meter.gpc and verify it again.'
+            else:next_step='Next: compile/install the matching titan_meter.gpc, select its slot, and check the PROG connection in Gtuner.'
+            self.bridge_next_step.set(next_step)
         if value['ready']:self.bridge_seen_ready=True
         elif self.bridge_seen_ready and self.bridge_enabled.get() and not self.pending_reconnect:
             self.trigger_armed.set(False);self._apply_green()
@@ -1381,6 +1433,7 @@ class Desktop(tk.Tk):
 
     def _log(self,value):
         self.log.configure(state='normal');self.log.insert('end',value)
+        if int(self.log.index('end-1c').split('.')[0])>2000:self.log.delete('1.0','501.0')
         self.log.see('end');self.log.configure(state='disabled')
 
     def _refresh(self):

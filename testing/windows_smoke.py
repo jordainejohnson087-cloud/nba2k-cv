@@ -42,6 +42,8 @@ def main():
             required = {'Models', 'Live Detection', 'Titan Two', 'Results', 'Updates', 'Improve Model'}
             if not required.issubset(names):
                 raise AssertionError(f'Missing app tabs: {required - set(names)}')
+            assert app.live_slots.winfo_exists() and len(app.live_slots.get_children())==9
+            assert app.bridge_service.process.pid != __import__('os').getpid()
             # Startup notification is nonmodal, persistent in the banner, and shown once per version.
             from app_update import current_version
             import app as app_module
@@ -123,6 +125,7 @@ def main():
                     prepare.assert_not_called()
                     assert '--capture-session' in start.call_args.args[0]
                     assert '--bridge-service' in start.call_args.args[0]
+                    assert '--expected-slot' not in start.call_args.args[0]
                     assert '--live-direct' not in start.call_args.args[0]
                 app.model.set(str(model));app.environment.set(sys.executable)
                 app.seconds.set('0');app.compute.set('0');app.bridge_enabled.set(True)
