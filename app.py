@@ -934,6 +934,9 @@ class Desktop(tk.Tk):
         # Diagnostic sending must work with the original standalone receiver,
         # which has no app API, version handshake, heartbeat or execution counter.
         self._disarm_shots()
+        if not status.get('ready') or type(status.get('device_test_count')) is not int:
+            # Keep auto-reconnect from selecting the meter slot during a legacy test.
+            self._disconnect_bridge()
         try:
             script=self._export_bridge()/'console_button_check.py'
             if not script.is_file():raise OSError('Matching console test sender is missing')

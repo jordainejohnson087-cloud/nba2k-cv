@@ -81,7 +81,7 @@ class ConsoleUiTests(unittest.TestCase):
         status=dict(ready=True,test_available=True,device_test_count=0,output_allowed=False)
         service=Mock();service.status.return_value=status
         return SimpleNamespace(bridge_service=service,console_test_status=Variable(''),
-            _disarm_shots=Mock(),_export_bridge=Mock(return_value=folder),messages=queue.Queue())
+            _disarm_shots=Mock(),_disconnect_bridge=Mock(),_export_bridge=Mock(return_value=folder),messages=queue.Queue())
 
     def test_app_disarms_and_launches_one_powershell_request(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -120,6 +120,7 @@ class ConsoleUiTests(unittest.TestCase):
                     thread.return_value.start.side_effect=lambda:thread.call_args.kwargs['target']()
                     Desktop._console_tap(ui,'A')
                     launch.assert_called_once();ui._disarm_shots.assert_called_once()
+                    ui._disconnect_bridge.assert_called_once()
                     result=ui.messages.get_nowait()[1][0]
                     self.assertIn('Original manual A request sent once',result)
                     self.assertIn('Sending does not confirm delivery',result)
