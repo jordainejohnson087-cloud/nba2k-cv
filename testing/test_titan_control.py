@@ -213,6 +213,22 @@ class TitanHardwareDiscoveryTests(unittest.TestCase):
             value=titan_hardware_inventory()
         self.assertEqual(value['state'],'unavailable');self.assertFalse(value['auto_connect'])
 
+    def test_verified_live_bridge_survives_missing_or_reappearing_usb_scan(self):
+        from app import Desktop
+        from types import SimpleNamespace
+        from pathlib import Path
+        import tempfile
+        app=SimpleNamespace(hardware_scan_pending=False,hardware_inventory={},titan_usb_status=Mock(),
+            bridge_enabled=Mock(),preparing_bridge=False,hardware_autoconnect_id='one',
+            _connect_bridge=Mock(),trigger_armed=Mock(),_apply_green=Mock(),bridge_service=Mock(),
+            hardware_closing=True)
+        app.bridge_service.status.return_value={'ready':True}
+        with tempfile.TemporaryDirectory() as folder,patch('app.PROJECT',Path(folder)):
+            Desktop._handle_titan_hardware(app,dict(state='missing',auto_connect=False,devices=[],message='Not detected'))
+            Desktop._handle_titan_hardware(app,dict(state='available',auto_connect=True,devices=[dict(id='one')],message='Detected'))
+        app.trigger_armed.set.assert_not_called();app.bridge_service.clear.assert_not_called()
+        app._connect_bridge.assert_not_called();self.assertEqual(app.hardware_autoconnect_id,'one')
+
     def test_hotplug_reconnects_once_then_disarms_on_removal(self):
         from app import Desktop
         from types import SimpleNamespace

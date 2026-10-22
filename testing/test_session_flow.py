@@ -19,7 +19,7 @@ class SessionTests(unittest.TestCase):
     def ui(self,out):
         ui=SimpleNamespace(session_requested=True,session_deadline=time.monotonic()+30,session_engine_started=False,
             capture_active=True,live_active=True,active_out=out,preparing_bridge=False,
-            trigger_armed=Variable(False),bridge_enabled=Variable(True),status=Variable(''),session_status=Variable(''),
+            trigger_armed=Variable(False),release_status=Variable(''),bridge_enabled=Variable(True),status=Variable(''),session_status=Variable(''),
             bridge_service=Mock(),_save=Mock(),_capture_ready=Mock(return_value=True),after=Mock(),_live=Mock())
         ui.bridge_service.status.return_value=dict(ready=True,device_gate=272)
         for name in ('_session_tick','_detector_status','_arming_blocker','_apply_green','_arm_shots','_disarm_shots','_shot_mode_changed'):
@@ -66,6 +66,28 @@ class SessionTests(unittest.TestCase):
             ui.bridge_service.allow_output.assert_called_with(False)
             self.assertTrue(ui.capture_active);self.assertTrue(ui.live_active)
             self.assertIn('release X',ui.session_status.get())
+
+    def test_checkbox_immediately_applies_arm_and_disarm_to_detector_and_host(self):
+        with tempfile.TemporaryDirectory() as folder:
+            out=Path(folder);ui=self.ui(out)
+            ui.trigger_armed.set(True);Desktop._toggle_x_release(ui)
+            self.assertTrue(ui.trigger_armed.get())
+            self.assertTrue(json.loads((out/'green_settings.json').read_text())['armed'])
+            ui.bridge_service.allow_output.assert_called_with(True)
+            self.assertIn('ARMED',ui.release_status.get())
+            ui.trigger_armed.set(False);Desktop._toggle_x_release(ui)
+            self.assertFalse(json.loads((out/'green_settings.json').read_text())['armed'])
+            ui.bridge_service.allow_output.assert_called_with(False)
+            ui.bridge_service.clear.assert_called()
+
+    def test_blocked_checkbox_explains_the_specific_reason_next_to_control(self):
+        with tempfile.TemporaryDirectory() as folder:
+            ui=self.ui(Path(folder))
+            ui.bridge_service.status.return_value=dict(ready=False,stage='Selected Titan slot does not match')
+            ui.trigger_armed.set(True);Desktop._toggle_x_release(ui)
+            self.assertFalse(ui.trigger_armed.get())
+            self.assertIn('Selected Titan slot does not match',ui.release_status.get())
+            self.assertEqual(ui.session_status.get(),ui.release_status.get())
 
     def test_settings_write_failure_disarms_host(self):
         with tempfile.TemporaryDirectory() as folder:

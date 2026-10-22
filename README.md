@@ -1,5 +1,16 @@
 # NBA 2K shot-meter CV pipeline
 
+## Controller-held X override arming (2026102209)
+
+The calibration checkbox previously changed a UI variable without applying detector settings or bridge output permission. It now invokes the same arming/disarming operation as the live controls immediately. Both views show a persistent X override status and the specific blocker (capture, stale detector, bridge stage, script capability, or settings write failure); transitions are logged. Unchecking disables output and clears pending events immediately.
+
+A Windows USB inventory scan can report a device missing even while the existing Gtuner/Titan session remains verified. Such a scan no longer disarms or reconnects that verified session. Loss of the actual live bridge still disarms output, as do stopped/stale capture or detection. These checks are retained rather than forcing the checkbox to stay selected without a working pipeline.
+
+For normal controller shots: Start Session, wait for live frames and the verified meter bridge, then enable **AI override of held X**. Release X once after arming, then hold X to shoot. A fresh observed green event makes Titan output X=0 while physical X remains held; the override persists until physical release. This uses the existing bridge 3.6; no GPC change is needed for this app fix. **Start AI X Shot** is the separate app-started hold test and is not required for controller-held shots.
+
+Regression checks invoke the actual checkbox on Windows, confirm detector settings and host permission change together, preserve a verified live bridge across missing/reappearing USB scans, and retain the existing physical-X-until-release GPC behavior tests. The user's exact current shutdown cause still requires the visible status/log from their run.
+
+
 ## Integrate verified console output with AI X shots (2026102208)
 
 The user confirmed the PowerShell X hold/release test operates the Xbox on October 22, 2026. This establishes the output path; it does not establish meter timing accuracy. The app now adds **Start AI X Shot** to test the complete path in practice: PowerShell requests one X hold, the GPU detector measures the meter, and a fresh observed green event releases that same held output. The 750 ms manual test remains independent; it is not used to time this AI shot. Rhythm remains deferred.

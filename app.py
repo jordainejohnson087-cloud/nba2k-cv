@@ -275,6 +275,7 @@ class Desktop(tk.Tk):
         try:green=green_config(dict(saved.get('green',{}),shot_mode='timing'))
         except ValueError:green=green_config()
         self.trigger_armed=tk.BooleanVar(value=False)
+        self.release_status=tk.StringVar(value='X override OFF — start capture and detection, then enable.')
         self.green_vars={key:tk.StringVar(value=str(value)) for key,value in green.items() if key!='armed'}
         self.green_status=tk.StringVar(value='Green detector: awaiting observed frames • trigger off')
         self.record=tk.BooleanVar(value=False)
@@ -501,6 +502,7 @@ class Desktop(tk.Tk):
         ttk.Button(device_card,text='Disarm Shots',command=self._disarm_shots).pack(fill='x',pady=4)
         ttk.Label(device_card,text='X JUMPSHOTS: hold X through green. The AI releases X output; physically release X afterward. RT, movement and RS pass through.',
             style='CardMuted.TLabel',wraplength=235).pack(anchor='w',pady=6)
+        ttk.Label(device_card,textvariable=self.release_status,style='CardMuted.TLabel',wraplength=235).pack(anchor='w',pady=6)
         ttk.Label(device_card,textvariable=self.green_status,style='CardMuted.TLabel',wraplength=235).pack(anchor='w',pady=6)
         ttk.Label(device_card,text='X jumpshot control').pack(anchor='w')
         self.shot_mode_menu=mode_menu=ttk.Combobox(device_card,textvariable=self.green_vars['shot_mode'],values=('timing',),state='readonly')
@@ -618,7 +620,7 @@ class Desktop(tk.Tk):
         self.slot_table.pack(fill='x',pady=6)
         for i in range(1,10):self.slot_table.insert('', 'end',iid=str(i),text=str(i),values=('Unavailable — refresh with Gtuner open','Not verified'))
         ttk.Label(slots_page,text='Script names come from Gtuner. A fresh payload echo must confirm the active slot before output is enabled.',style='Muted.TLabel',wraplength=850).pack(anchor='w',pady=8)
-        calibration=ttk.LabelFrame(calibration_page,text='Green detection and stick flick',padding=10)
+        calibration=ttk.LabelFrame(calibration_page,text='Green detection and controller X release',padding=10)
         calibration.pack(fill='x',pady=8)
         fields=[('Hue low','hue_low'),('Hue high','hue_high'),('Saturation min','saturation_min'),
             ('Brightness min','value_min'),('Green row fraction','row_coverage'),('Confidence min','min_confidence'),
@@ -627,8 +629,10 @@ class Desktop(tk.Tk):
             row,column=divmod(index,3)
             ttk.Label(calibration,text=title).grid(row=row,column=column*2,sticky='w',padx=4,pady=3)
             ttk.Entry(calibration,textvariable=self.green_vars[key],width=9).grid(row=row,column=column*2+1,padx=4)
-        ttk.Checkbutton(calibration,text='Enable X-release trigger',
-            variable=self.trigger_armed).grid(row=5,column=0,columnspan=6,sticky='w',pady=6)
+        self.x_release_toggle=ttk.Checkbutton(calibration,text='Enable AI override of held X',
+            variable=self.trigger_armed,command=self._toggle_x_release)
+        self.x_release_toggle.grid(row=5,column=0,columnspan=6,sticky='w',pady=6)
+        ttk.Label(calibration,textvariable=self.release_status,wraplength=950).grid(row=8,column=0,columnspan=6,sticky='w',pady=4)
         ttk.Button(calibration,text='Apply X Shot Settings',command=self._apply_green).grid(row=6,column=0,columnspan=6,sticky='w')
         ttk.Label(calibration,textvariable=self.green_status,wraplength=950).grid(row=7,column=0,columnspan=6,sticky='w',pady=4)
         results=ttk.Frame(self.tabs,padding=14);self.tabs.add(results,text='Results')
@@ -723,18 +727,22 @@ class Desktop(tk.Tk):
             path=PROJECT/'test_results'/'titan_hardware.json';path.parent.mkdir(exist_ok=True)
             path.write_text(json.dumps(dict(timestamp=time.time(),**value),indent=2))
         except OSError:pass
+        bridge_verified=bool(self.bridge_service and self.bridge_service.status().get('ready') is True)
         if value.get('auto_connect'):
             key=value['devices'][0]['id']
-            if (self.bridge_enabled.get() and not self.preparing_bridge
+            if (self.bridge_enabled.get() and not self.preparing_bridge and not bridge_verified
                     and self.hardware_autoconnect_id!=key):
                 self.hardware_autoconnect_id=key
                 self._connect_bridge()
+        elif bridge_verified:
+            self.titan_usb_status.set(value['message']+' • Live Titan bridge is verified; keeping current connection.')
         elif value.get('state') not in ('unavailable','unsupported'):
             self.hardware_autoconnect_id=None
             if previous.get('state')!=value.get('state') or self.trigger_armed.get():
                 Desktop._cancel_pending_bridge(self)
                 if self.bridge_service:self.bridge_service.allow_output(False);self.bridge_service.clear()
                 self.trigger_armed.set(False);self._apply_green()
+                Desktop._release_feedback(self,'X override OFF — USB discovery: '+value['message'])
         if not self.hardware_closing:self.hardware_scan_after=self.after(3000,self._scan_titan_hardware)
 
     def _startup_bridge(self):
@@ -1044,9 +1052,25 @@ class Desktop(tk.Tk):
         self._disarm_shots()
         self.session_status.set('Shot mode changed — release X, then arm when ready.')
 
+    def _release_feedback(self,text):
+        indicator=getattr(self,'release_status',None)
+        changed=indicator is None or indicator.get()!=text
+        if indicator is not None:indicator.set(text)
+        session=getattr(self,'session_status',None)
+        if session is not None:session.set(text)
+        logger=getattr(self,'_log',None)
+        if changed and logger:logger('X release: '+text+'\n')
+
+    def _toggle_x_release(self):
+        if self.trigger_armed.get():self._arm_shots()
+        else:self._disarm_shots()
+
     def _apply_green(self):
         try:config=self._green_values()
         except ValueError as exc:
+            self.trigger_armed.set(False)
+            if self.bridge_service:self.bridge_service.allow_output(False);self.bridge_service.clear()
+            Desktop._release_feedback(self,'X override OFF — invalid green settings: '+str(exc))
             messagebox.showerror('Invalid green settings',str(exc));return
         blocked=None
         if config['armed']:
@@ -1061,7 +1085,9 @@ class Desktop(tk.Tk):
                 if self.bridge_service:self.bridge_service.clear()
         if self.bridge_service:self.bridge_service.allow_output(config["armed"] and self.bridge_enabled.get())
         self._save()
-        self.status.set(blocked or ('Green settings applied • '+('trigger enabled — use the selected shot mode' if config['armed'] else 'dry run')))
+        self.status.set(blocked or ('Green settings applied • '+('X override enabled' if config['armed'] else 'dry run')))
+        Desktop._release_feedback(self,('X override OFF — '+blocked) if blocked else
+            ('X override ARMED — release X once, then hold X through green; Titan releases its output.' if config['armed'] else 'X override OFF — capture and detection can continue.'))
 
     def _detector_status(self):
         if not self.live_active or not self.active_out:return None
@@ -1081,22 +1107,25 @@ class Desktop(tk.Tk):
         if self.preparing_bridge:return 'Wait for bridge preparation before arming.'
         if not self.capture_active or not self._capture_ready():return 'Start a live capture before arming.'
         if not self.live_active or not self._detector_status():return 'Wait for fresh AI detections before arming.'
-        if not self.bridge_enabled.get() or not self.bridge_service or not self.bridge_service.status().get('ready'):
-            return 'Connect and verify the Titan bridge before arming.'
-        if type(self.bridge_service.status().get('device_gate')) is not int or not (self.bridge_service.status()['device_gate'] & 256):
+        if not self.bridge_enabled.get() or not self.bridge_service:
+            return 'Enable and connect the Titan bridge before arming.'
+        bridge=self.bridge_service.status()
+        if not bridge.get('ready'):
+            return 'Titan bridge is not ready: '+str(bridge.get('stage','connect and verify the bridge.'))
+        if type(bridge.get('device_gate')) is not int or not (bridge['device_gate'] & 256):
             return 'Install the exported X-only Titan meter bridge 3.4, then restart the updated gtuner_meter worker.'
         return None
 
     def _arm_shots(self):
         self.trigger_armed.set(True);self._apply_green()
-        if self.trigger_armed.get():self.session_status.set('ARMED — X jumpshots: hold X; observed green releases X. Release X before the next shot.')
+        if self.trigger_armed.get():Desktop._release_feedback(self,'X override ARMED — release X once, then hold X through green; Titan releases its output.')
 
     def _disarm_shots(self):
         self.trigger_armed.set(False)
         if self.bridge_service:
             self.bridge_service.allow_output(False);self.bridge_service.clear()
         self._apply_green()
-        self.session_status.set('Shots disarmed. Capture and detection can continue.')
+        Desktop._release_feedback(self,'X override OFF — capture and detection can continue.')
 
     def _start_session(self):
         if self.session_requested:return
@@ -1709,7 +1738,7 @@ class Desktop(tk.Tk):
         self.bridge_status.set(summary)
         if self.trigger_armed.get() and (not self.live_active or not self.capture_active or not self._detector_status()):
             self._disarm_shots()
-            self.session_status.set('Shots disarmed — detection or capture stopped updating. Start Session to retry.')
+            Desktop._release_feedback(self,'X override OFF — capture or detection stopped updating. Start Session, wait for live frames, then enable again.')
         if hasattr(self,'bridge_next_step'):
             if value['ready']:next_step='Transport verified. Test console input separately in an offline practice session; console output is unverified.'
             elif value.get('receiver')!='receiving':next_step='Next: start gtuner_meter.py in Gtuner Computer Vision with Null Video Input. Check its Python/OpenCV indicators. Disconnect other Titan hosts first.'
@@ -1721,6 +1750,7 @@ class Desktop(tk.Tk):
             self.trigger_armed.set(False);self._apply_green()
             self.pending_reconnect=True;self.reconnect_attempts=0;self.bridge_seen_ready=False
             self.bridge_setup_status.set('Bridge lost. Trigger disabled; capture and AI continue while reconnecting.')
+            Desktop._release_feedback(self,'X override OFF — Titan connection lost: '+str(value.get('stage','no live acknowledgment')))
             self.after(1000,self._retry_bridge)
 
     @staticmethod
