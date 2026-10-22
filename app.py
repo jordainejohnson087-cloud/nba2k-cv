@@ -207,6 +207,8 @@ class Desktop(tk.Tk):
         self.hardware_closing=False
         self.active_out=None
         self.live_active=False
+        self.session_requested=False;self.session_deadline=0
+        self.session_status=tk.StringVar(value='Start Session prepares capture, detection and the Titan bridge. Shots start disarmed.')
         self.preview_image=None
         self.last_preview_stamp=None
         self.importing_model=False
@@ -441,6 +443,10 @@ class Desktop(tk.Tk):
         work=ttk.Frame(live);work.grid(row=0,column=1,sticky='nsew')
         work.columnconfigure(0,weight=1);work.rowconfigure(2,weight=1)
         actions=ttk.Frame(work);actions.grid(row=0,column=0,sticky='ew',pady=(0,12))
+        session_actions=ttk.Frame(actions);session_actions.pack(fill='x',pady=(0,8))
+        ttk.Button(session_actions,text='▶  Start Session',style='Accent.TButton',command=self._start_session).pack(side='left')
+        ttk.Button(session_actions,text='■  Stop Session',command=self._stop_session).pack(side='left',padx=8)
+        ttk.Label(session_actions,textvariable=self.session_status,style='Muted.TLabel',wraplength=360).pack(side='left',padx=5)
         capture_actions=ttk.Frame(actions);capture_actions.pack(fill='x')
         ttk.Button(capture_actions,text='▶  Start Capture',style='Accent.TButton',command=self._start_capture).pack(side='left')
         ttk.Button(capture_actions,text='■  Stop Capture',style='Stop.TButton',command=self._stop_capture).pack(side='left',padx=8)
@@ -487,6 +493,15 @@ class Desktop(tk.Tk):
         ttk.Button(device_card,text='Connect / Reconnect',style='Accent.TButton',command=self._connect_bridge).pack(fill='x',pady=4)
         ttk.Button(device_card,text='Disconnect bridge',command=self._disconnect_bridge).pack(fill='x',pady=4)
         ttk.Button(device_card,text='Scan USB',command=self._scan_titan_hardware).pack(fill='x',pady=4)
+        ttk.Separator(device_card).pack(fill='x',pady=8)
+        ttk.Button(device_card,text='Arm Meter Shots',style='Accent.TButton',command=self._arm_shots).pack(fill='x',pady=4)
+        ttk.Button(device_card,text='Disarm Shots',command=self._disarm_shots).pack(fill='x',pady=4)
+        ttk.Label(device_card,text='Hold Xbox X to begin the shot. A fresh green-meter event commands the selected right-stick flick. R3 cancels.',
+            style='CardMuted.TLabel',wraplength=235).pack(anchor='w',pady=6)
+        ttk.Label(device_card,textvariable=self.green_status,style='CardMuted.TLabel',wraplength=235).pack(anchor='w',pady=6)
+        ttk.Label(device_card,text='Direction').pack(anchor='w')
+        ttk.Combobox(device_card,textvariable=self.green_vars['direction'],values=('up','down'),state='readonly').pack(fill='x',pady=4)
+        ttk.Button(device_card,text='Apply Shot Settings',command=self._apply_green).pack(fill='x',pady=4)
         ttk.Label(device_card,textvariable=self.bridge_status,style='CardMuted.TLabel',wraplength=235).pack(anchor='w',pady=8)
         ttk.Label(device_card,textvariable=self.bridge_next_step,style='CardMuted.TLabel',wraplength=235).pack(anchor='w',pady=8)
         slots_card=self._card(bridge_controls,'MEMORY SLOTS')
@@ -852,7 +867,12 @@ class Desktop(tk.Tk):
                             if not still_current():return
                             service.configure(expected_slot=target)
                             controller.select_slot(target)
+                        cv_error=None
+                        if current.get('receiver')!='receiving' and not read_only:
+                            try:controller.start_cv(active=still_current)
+                            except Exception as exc:cv_error=str(exc)
                         result=service.verify(timeout=3,expected_slot=target if switch and not read_only else None)
+                        if cv_error and not result.get('ready'):result=dict(result,stage=result['stage']+'. '+cv_error)
                         if read_only:result=dict(result,read_only=True)
                     else:
                         result=current
@@ -880,14 +900,95 @@ class Desktop(tk.Tk):
         try:config=self._green_values()
         except ValueError as exc:
             messagebox.showerror('Invalid green settings',str(exc));return
-        if config['armed'] and getattr(self,'preparing_bridge',False):
-            self.trigger_armed.set(False);config=dict(config,armed=False)
+        blocked=None
+        if config['armed']:
+            blocked=self._arming_blocker()
+            if blocked:self.trigger_armed.set(False);config=dict(config,armed=False)
         if self.live_active and self.active_out:
             from run_live import atomic_write
-            atomic_write(self.active_out/'green_settings.json',json.dumps(config).encode())
+            try:atomic_write(self.active_out/'green_settings.json',json.dumps(config).encode())
+            except OSError as exc:
+                self.trigger_armed.set(False);config=dict(config,armed=False)
+                blocked='Shots disarmed — settings could not be applied: '+str(exc)
+                if self.bridge_service:self.bridge_service.clear()
         if self.bridge_service:self.bridge_service.allow_output(config["armed"] and self.bridge_enabled.get())
         self._save()
-        self.status.set('Green settings applied • '+('trigger enabled' if config['armed'] else 'dry run'))
+        self.status.set(blocked or ('Green settings applied • '+('trigger enabled — hold X to shoot' if config['armed'] else 'dry run')))
+
+    def _detector_status(self):
+        if not self.live_active or not self.active_out:return None
+        try:
+            value=json.loads((self.active_out/'live_status.json').read_text(encoding='utf-8'))
+            if not 0<=time.time()-value['timestamp']<=.5:return None
+            return value
+        except (OSError,ValueError,KeyError,TypeError):return None
+
+    def _arming_blocker(self):
+        if self.preparing_bridge:return 'Wait for bridge preparation before arming.'
+        if not self.capture_active or not self._capture_ready():return 'Start a live capture before arming.'
+        if not self.live_active or not self._detector_status():return 'Wait for fresh AI detections before arming.'
+        if not self.bridge_enabled.get() or not self.bridge_service or not self.bridge_service.status().get('ready'):
+            return 'Connect and verify the Titan bridge before arming.'
+        return None
+
+    def _arm_shots(self):
+        self.trigger_armed.set(True);self._apply_green()
+        if self.trigger_armed.get():self.session_status.set('ARMED — hold X; observed green controls the flick. R3 cancels.')
+
+    def _disarm_shots(self):
+        self.trigger_armed.set(False)
+        if self.bridge_service:
+            self.bridge_service.allow_output(False);self.bridge_service.clear()
+        self._apply_green()
+        self.session_status.set('Shots disarmed. Capture and detection can continue.')
+
+    def _start_session(self):
+        if self.session_requested:return
+        if self._busy(allow_capture=True,allow_detection=self.live_active,allow_bridge=True):return
+        if not Path(self.model.get()).is_file():
+            messagebox.showinfo('Choose a model','Select your trained meter weight before starting a session.');return
+        if not self._settings() or not self._python():return
+        self.session_requested=True;self.session_deadline=time.monotonic()+30;self.session_engine_started=self.live_active
+        self.trigger_armed.set(False)
+        if self.compute.get()=='cpu':self.compute.set('auto')
+        self.session_status.set('Preparing capture, GPU detector and bridge…')
+        self._connect_bridge()
+        if not self.capture_active:self._start_capture()
+        self.after(100,self._session_tick)
+
+    def _session_tick(self):
+        if not self.session_requested:return
+        if time.monotonic()>=self.session_deadline:
+            self.session_requested=False
+            self.trigger_armed.set(False);self._apply_green()
+            self.session_status.set('Setup incomplete — shots disarmed. Check the capture and bridge status below.')
+            return
+        if self.capture_active and self._capture_ready():
+            if not self.live_active:
+                if self.session_engine_started:
+                    self.session_requested=False
+                    self.session_status.set('Detector stopped — shots disarmed. Check the output panel before restarting.')
+                    return
+                self.session_status.set('Starting detector; checking the Gtuner receiver…')
+                self._live()
+                if not self.live_active:
+                    self.session_requested=False;return
+                self.session_engine_started=True
+            data=self._detector_status()
+            if data and self.bridge_service and self.bridge_service.status().get('ready') and not self.preparing_bridge:
+                self.session_requested=False
+                self.session_status.set('Session ready — preview, AI and Titan connected. Arm Meter Shots when ready.')
+                return
+        elif not self.capture_active and not getattr(self,'capture_handoff_pending',False):
+            self.session_requested=False
+            self.session_status.set('Capture could not start — check the output panel.')
+            return
+        self.after(150,self._session_tick)
+
+    def _stop_session(self):
+        self.session_requested=False
+        self._disarm_shots();self._stop_capture()
+        self.session_status.set('Stopping session — controller output disarmed.')
 
     def _choose_environment(self):
         chosen=filedialog.askopenfilename(parent=self,title="Choose environment Python executable",
@@ -1096,8 +1197,17 @@ class Desktop(tk.Tk):
         if not self.capture_active or not self.capture_out:return False
         try:
             value=json.loads((self.capture_out/'capture_status.json').read_text())
-            return value.get('state')=='capturing' and value.get('frames',0)>0 and 0<=time.time()-value['timestamp']<=2
-        except (OSError,ValueError,KeyError):return False
+            if value.get('state')=='stopped':return False
+            if value.get('state')=='capturing' and value.get('frames',0)>0 and 0<=time.time()-value['timestamp']<=2:return True
+        except (OSError,ValueError,KeyError):pass
+        monitor=None
+        try:
+            monitor=RawMailbox(self.capture_out/'source_frames.bin')
+            progress=monitor.progress()
+            return bool(progress and 0<=time.time()-progress['timestamp']<=.75)
+        except (OSError,ValueError):return False
+        finally:
+            if monitor:monitor.close()
 
     def _start_capture(self):
         if self.capture_active:
@@ -1255,6 +1365,7 @@ class Desktop(tk.Tk):
         threading.Thread(target=read_output,daemon=True).start()
 
     def _stop(self,reconnect=False):
+        self.session_requested=False
         if self.bridge_service:
             self.bridge_service.allow_output(False);self.bridge_service.clear()
         self.trigger_armed.set(False)
@@ -1432,6 +1543,9 @@ class Desktop(tk.Tk):
         summary=('Bridge disabled • ' if not self.bridge_enabled.get() else '')+value['stage']
         if value.get('rtt_ms') is not None:summary+=f" | CV acknowledgments {value.get('acknowledged',0)} | RTT {value['rtt_ms']:.1f} ms"
         self.bridge_status.set(summary)
+        if self.trigger_armed.get() and (not self.live_active or not self.capture_active or not self._detector_status()):
+            self._disarm_shots()
+            self.session_status.set('Shots disarmed — detection or capture stopped updating. Start Session to retry.')
         if hasattr(self,'bridge_next_step'):
             if value['ready']:next_step='Transport verified. Test console input separately in an offline practice session; console output is unverified.'
             elif value.get('receiver')!='receiving':next_step='Next: start gtuner_meter.py in Gtuner Computer Vision with Null Video Input. Check its Python/OpenCV indicators. Disconnect other Titan hosts first.'
@@ -1520,6 +1634,7 @@ class Desktop(tk.Tk):
                 measurement=data['green'];trigger=data.get('trigger',{})
                 self.green_status.set(f"{'ARMED' if trigger.get('armed') else 'DRY RUN'} | "
                     f"in green: {measurement.get('in_green',False)} | event {trigger.get('event_id',0)} | "
+                    f"Titan flick {self.bridge_service.status().get('device_event',0) if self.bridge_service else 0} | "
                     f"{measurement.get('reason','')}" + (' • STALE' if age>.25 else ''))
             if self.capture_active or (self.active_out/'live_bgr.bin').exists():return
             image=self.active_out/'preview.png'
@@ -1751,6 +1866,7 @@ class Desktop(tk.Tk):
         else:self.destroy()
 
     def destroy(self):
+        self.session_requested=False
         Desktop._cancel_pending_bridge(self)
         self.hardware_closing=True
         self.capture_handoff_pending=False

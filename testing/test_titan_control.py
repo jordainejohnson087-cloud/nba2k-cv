@@ -1,9 +1,35 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock,patch
 from titan_control import GtunerController,parse_slot_rows,slot_number,choose_meter_slot
 
 
 class TitanControlTests(unittest.TestCase):
+    def cv_controls(self):
+        combo=Mock();combo.element_info=SimpleNamespace(control_type='ComboBox')
+        combo.window_text.return_value='Video Input Check';combo.texts.return_value=['Video Input Check','gtuner_meter']
+        button=Mock();button.element_info=SimpleNamespace(control_type='Button')
+        button.window_text.return_value='Start Computer Vision';button.is_enabled.return_value=True
+        pane=Mock();pane.element_info=SimpleNamespace(control_type='Pane')
+        pane.window_text.return_value='Computer Vision';pane.descendants.return_value=[combo,button]
+        window=Mock();window.descendants.return_value=[pane,combo,button]
+        return GtunerController('Gtuner.exe',window=window),pane,combo,button
+
+    def test_cv_start_selects_receiver_and_clicks_only_identified_play_control(self):
+        controller,_,combo,button=self.cv_controls()
+        self.assertTrue(controller.start_cv())
+        combo.select.assert_called_once_with('gtuner_meter');button.click.assert_called_once_with()
+        controller.window.type_keys.assert_not_called()
+
+    def test_cv_start_rejects_ambiguous_play_buttons_and_cancellation(self):
+        controller,pane,combo,button=self.cv_controls()
+        pane.descendants.return_value=[combo,button,button]
+        with self.assertRaisesRegex(RuntimeError,'play control'):controller.start_cv()
+        combo.select.assert_not_called();button.click.assert_not_called()
+        pane.descendants.return_value=[combo,button]
+        with self.assertRaisesRegex(RuntimeError,'cancelled'):controller.start_cv(active=lambda:False)
+        combo.select.assert_not_called();button.click.assert_not_called()
+
     def test_reads_only_explicit_unique_slot_labels(self):
         names=parse_slot_rows([['1','NBA2K CV Meter Bridge','2.0'],['Slot 2: Practice'],
                               ['3','Run'],['4','First'],['4','Conflicting'],['9','Empty']])

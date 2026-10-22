@@ -167,6 +167,35 @@ class GtunerController:
         window.type_keys('^'+str(slot),set_foreground=False,pause=.05)
         return slot  # Request sent; this is NOT device confirmation.
 
+    def start_cv(self,script='gtuner_meter',active=lambda:True):
+        """Request CV startup only through unambiguous accessible controls.
+
+        Qt accessibility varies between Gtuner builds. Missing labels are a
+        setup limitation, never a reason to guess screen coordinates or keys.
+        """
+        window=self.connect()
+        panes=[node for node in window.descendants()
+               if node.window_text().strip()=='Computer Vision' and
+               node.element_info.control_type in ('Pane','Group')]
+        if len(panes)!=1:raise RuntimeError('Open Gtuner Computer Vision once; its panel is not exposed to the app.')
+        nodes=panes[0].descendants()
+        combos=[]
+        for node in nodes:
+            if node.element_info.control_type!='ComboBox':continue
+            labels=[text.strip() for text in node.texts()]
+            if script in labels or script+'.py' in labels or 'Video Input Check' in labels:combos.append(node)
+        if len(combos)!=1:raise RuntimeError('Choose gtuner_meter in Gtuner CV once; its script selector is not identifiable.')
+        buttons=[node for node in nodes if node.element_info.control_type=='Button' and
+            node.window_text().strip().lower() in ('start','run','start computer vision','run computer vision','start gcv script')
+            and node.is_enabled()]
+        if len(buttons)!=1:raise RuntimeError('Start gtuner_meter in Gtuner CV once; the app cannot identify its play control.')
+        if not active():raise RuntimeError('CV startup cancelled')
+        labels=[text.strip() for text in combos[0].texts()]
+        combos[0].select(script+'.py' if script+'.py' in labels and script not in labels else script)
+        if not active():raise RuntimeError('CV startup cancelled')
+        buttons[0].click()
+        return True  # Request only. The UDP receiver and Titan echo verify success.
+
     @staticmethod
     def _is_foreground(window):
         import win32gui

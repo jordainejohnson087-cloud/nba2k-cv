@@ -132,6 +132,22 @@ def main():
                     assert command[0]==sys.executable and '--capture-only' in command
                     assert '--model' not in command and '--device' not in command and '--bridge-service' not in command
                 app.capture_active=False;app.capture_process=None
+                # One front-end coordinates the existing separate workers; arming is explicit.
+                app.live_active=False;app.process=None;app.preparing_bridge=False
+                def start_engine():app.live_active=True
+                with patch.object(app,'_save'),patch.object(app,'_busy',return_value=False),\
+                     patch.object(app,'_connect_bridge') as connect,patch.object(app,'_start_capture') as capture,\
+                     patch.object(app,'_capture_ready',return_value=True),\
+                     patch.object(app,'_detector_status',return_value={'timestamp':time.time(),'device':'0'}),\
+                     patch.object(app.bridge_service,'status',return_value={'ready':True}),\
+                     patch.object(app,'_live',side_effect=start_engine) as engine:
+                    app._start_session();connect.assert_called_once();capture.assert_called_once()
+                    app.capture_active=True;app._session_tick();engine.assert_called_once()
+                    assert 'Session ready' in app.session_status.get() and not app.trigger_armed.get()
+                    app._arm_shots();assert app.trigger_armed.get()
+                    app._disarm_shots();assert not app.trigger_armed.get()
+                    assert app.capture_active and app.live_active
+                app.capture_active=False;app.live_active=False;app.session_requested=False
                 # Remove the simulated capture's completion before the next independent run.
                 import queue
                 while True:

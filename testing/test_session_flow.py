@@ -1,0 +1,96 @@
+import json
+import tempfile
+import time
+import unittest
+from pathlib import Path
+from types import SimpleNamespace,MethodType
+from unittest.mock import Mock,patch
+from app import Desktop
+from meter_green import green_config
+
+
+class Variable:
+    def __init__(self,value):self.value=value
+    def get(self):return self.value
+    def set(self,value):self.value=value
+
+
+class SessionTests(unittest.TestCase):
+    def ui(self,out):
+        ui=SimpleNamespace(session_requested=True,session_deadline=time.monotonic()+30,session_engine_started=False,
+            capture_active=True,live_active=True,active_out=out,preparing_bridge=False,
+            trigger_armed=Variable(False),bridge_enabled=Variable(True),status=Variable(''),session_status=Variable(''),
+            bridge_service=Mock(),_save=Mock(),_capture_ready=Mock(return_value=True),after=Mock(),_live=Mock())
+        ui.bridge_service.status.return_value=dict(ready=True)
+        for name in ('_session_tick','_detector_status','_arming_blocker','_apply_green','_arm_shots','_disarm_shots'):
+            setattr(ui,name,MethodType(getattr(Desktop,name),ui))
+        ui._green_values=lambda:green_config(dict(armed=ui.trigger_armed.get()))
+        (out/'live_status.json').write_text(json.dumps(dict(timestamp=time.time(),status='absent',device='0')))
+        return ui
+
+    def test_session_becomes_ready_but_never_arms_automatically(self):
+        with tempfile.TemporaryDirectory() as folder:
+            ui=self.ui(Path(folder));ui._session_tick()
+            self.assertFalse(ui.session_requested);self.assertFalse(ui.trigger_armed.get())
+            self.assertIn('Session ready',ui.session_status.get())
+
+    def test_arm_uses_live_engine_and_bridge_then_disarm_keeps_preview_running(self):
+        with tempfile.TemporaryDirectory() as folder:
+            out=Path(folder);ui=self.ui(out);ui._arm_shots()
+            self.assertTrue(ui.trigger_armed.get());ui.bridge_service.allow_output.assert_called_with(True)
+            self.assertTrue(json.loads((out/'green_settings.json').read_text())['armed'])
+            ui._disarm_shots()
+            self.assertFalse(ui.trigger_armed.get());ui.bridge_service.allow_output.assert_called_with(False)
+            self.assertFalse(json.loads((out/'green_settings.json').read_text())['armed'])
+            self.assertTrue(ui.capture_active);self.assertTrue(ui.live_active)
+
+    def test_arming_rejects_stale_engine_missing_capture_wrong_bridge_and_preparation(self):
+        for condition in ('stale','capture','bridge','preparing'):
+            with self.subTest(condition=condition),tempfile.TemporaryDirectory() as folder:
+                out=Path(folder);ui=self.ui(out)
+                if condition=='stale':(out/'live_status.json').write_text(json.dumps(dict(timestamp=time.time()-5)))
+                if condition=='capture':ui._capture_ready.return_value=False
+                if condition=='bridge':ui.bridge_service.status.return_value=dict(ready=False)
+                if condition=='preparing':ui.preparing_bridge=True
+                ui._arm_shots()
+                self.assertFalse(ui.trigger_armed.get())
+                ui.bridge_service.allow_output.assert_called_with(False)
+
+    def test_settings_write_failure_disarms_host(self):
+        with tempfile.TemporaryDirectory() as folder:
+            ui=self.ui(Path(folder))
+            with patch('run_live.atomic_write',side_effect=PermissionError('locked')):ui._arm_shots()
+            self.assertFalse(ui.trigger_armed.get());ui.bridge_service.allow_output.assert_called_with(False)
+            self.assertIn('could not be applied',ui.status.get())
+
+    def test_startup_timeout_and_cancel_do_not_restart_engine(self):
+        with tempfile.TemporaryDirectory() as folder:
+            ui=self.ui(Path(folder));ui.session_deadline=0;ui._session_tick()
+            self.assertFalse(ui.session_requested);ui._live.assert_not_called()
+            ui.after.assert_not_called()
+            ui.session_requested=True;ui.session_deadline=time.monotonic()+30
+            ui.live_active=False;ui.session_engine_started=True;ui._session_tick()
+            self.assertFalse(ui.session_requested);ui._live.assert_not_called()
+            self.assertIn('Detector stopped',ui.session_status.get())
+
+    def test_cancelled_session_callback_does_nothing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            ui=self.ui(Path(folder));ui.session_requested=False;ui._session_tick()
+            ui._live.assert_not_called();ui.after.assert_not_called()
+
+    def test_start_session_coordinates_workers_then_waits_for_preview(self):
+        with tempfile.TemporaryDirectory() as folder:
+            out=Path(folder);ui=self.ui(out);model=out/'best.pt';model.write_bytes(b'test')
+            ui.session_requested=False;ui.capture_active=False;ui.live_active=False
+            ui.model=Variable(str(model));ui.compute=Variable('cpu')
+            ui._busy=Mock(return_value=False);ui._settings=Mock(return_value=(1920,1080,60,1280,0))
+            ui._python=Mock(return_value='python.exe');ui._connect_bridge=Mock();ui._start_capture=Mock()
+            Desktop._start_session(ui)
+            ui._connect_bridge.assert_called_once_with();ui._start_capture.assert_called_once_with()
+            ui._live.assert_not_called();self.assertEqual(ui.compute.get(),'auto')
+            self.assertFalse(ui.trigger_armed.get())
+            ui.capture_active=True
+            ui._live.side_effect=lambda:setattr(ui,'live_active',True)
+            ui._session_tick();ui._live.assert_called_once_with()
+            self.assertFalse(ui.session_requested);self.assertIn('Session ready',ui.session_status.get())
+
