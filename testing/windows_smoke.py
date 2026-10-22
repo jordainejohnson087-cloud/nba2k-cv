@@ -48,6 +48,25 @@ def main():
             if not required.issubset(names):
                 raise AssertionError(f'Missing app tabs: {required - set(names)}')
             assert app.live_slots.winfo_exists() and len(app.live_slots.get_children())==9
+            # Output is resizable and detachable; video has one movable presentation target.
+            assert len(app.live_panes.panes())==2
+            app.live_panes.sashpos(0,250);app.update()
+            app._log('WINDOW TEST: before popout\n');app._open_output();app.update()
+            app._log('WINDOW TEST: after popout\n')
+            assert 'after popout' in app.output_log.get('1.0','end')
+            app.output_window.event_generate('<<WindowTest>>');app.update()
+            from PIL import Image
+            app._open_video();app.update()
+            assert app._video_target()==app.video_screen
+            app._present_image(Image.new('RGB',(320,180),'red'))
+            app._open_video(True);app.update()
+            assert app.video_window.attributes('-fullscreen')
+            app.video_window.event_generate('<Escape>');app.update()
+            app.video_window.attributes('-fullscreen',False)
+            app._dock_video();app.update()
+            assert app._video_target()==app.screen
+            app._present_image(Image.new('RGB',(320,180),'blue'))
+            app.output_window.destroy();app.output_window=None;app.output_log=None
             assert app.bridge_service.process.pid != __import__('os').getpid()
             # Startup notification is nonmodal, persistent in the banner, and shown once per version.
             from app_update import current_version

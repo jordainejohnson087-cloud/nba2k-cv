@@ -1,5 +1,6 @@
 """Simple Windows desktop control panel for capture, detection, review, and updates."""
 import json
+import math
 import os
 import queue
 import subprocess
@@ -21,11 +22,37 @@ PROJECT=Path(__file__).resolve().parent
 SETTINGS=PROJECT/'app_settings.json'
 
 
+def draw_meter_box(image, payload, frame_timestamp, now=None):
+    """Scale source coordinates onto the preview; never paint a stale observation."""
+    from PIL import ImageDraw
+    now=time.time() if now is None else now
+    try:
+        observed=float(payload['captured_at'])
+        status=payload['status']
+        box=tuple(float(v) for v in payload['box'])
+        width,height=payload['frame_size']
+        values=(*box,observed,float(frame_timestamp),float(payload['timestamp']),width,height)
+        if (len(box)!=4 or not all(math.isfinite(v) for v in values) or width<=0 or height<=0
+                or status not in ('detected','predicted') or not 0<=now-payload['timestamp']<=.3
+                or abs(frame_timestamp-observed)>.2):return image
+        x1,y1,x2,y2=box
+        if not 0<=x1<x2<=width or not 0<=y1<y2<=height:return image
+        result=image.copy();draw=ImageDraw.Draw(result)
+        scale_x,scale_y=result.width/width,result.height/height
+        rectangle=(x1*scale_x,y1*scale_y,x2*scale_x,y2*scale_y)
+        color='#00e5ff' if status=='detected' else '#ffbd59'
+        draw.rectangle(rectangle,outline=color,width=2)
+        draw.text((rectangle[0],max(0,rectangle[1]-14)),
+                  'METER' if status=='detected' else 'PREDICTED',fill=color)
+        return result
+    except (KeyError,TypeError,ValueError,OverflowError):return image
+
+
 class PreviewWorker:
     """Prepare only the newest frame off Tk's thread; no growing frame queue."""
     def __init__(self,path):
         self.path=path;self.size=(1280,720);self.latest=None;self.error=None
-        self.lock=threading.Lock();self.stop=threading.Event()
+        self.lock=threading.Lock();self.stop=threading.Event();self.overlay_path=None
         self.thread=threading.Thread(target=self._run,daemon=True);self.thread.start()
 
     def _run(self):
@@ -40,8 +67,15 @@ class PreviewWorker:
                 if not sample:self.stop.wait(.002);continue
                 started=time.perf_counter()
                 image=Image.frombytes('RGB',(sample['width'],sample['height']),sample['bgr'],'raw','BGR')
-                with self.lock:size=self.size
-                image.thumbnail(size,Image.Resampling.BILINEAR)
+                with self.lock:size=self.size;overlay_path=self.overlay_path
+                scale=min(size[0]/image.width,size[1]/image.height)
+                target=(max(1,round(image.width*scale)),max(1,round(image.height*scale)))
+                if target!=image.size:image=image.resize(target,Image.Resampling.BILINEAR)
+                if overlay_path:
+                    try:
+                        payload=json.loads(Path(overlay_path).read_text(encoding='utf-8'))
+                        image=draw_meter_box(image,payload,sample['timestamp'])
+                    except (OSError,ValueError):pass
                 value=dict(image=image,sequence=sample['sequence'],timestamp=sample['timestamp'],
                            prepare_ms=(time.perf_counter()-started)*1000)
                 sequence=sample['sequence']
@@ -50,9 +84,9 @@ class PreviewWorker:
         finally:
             if mailbox:mailbox.close()
 
-    def read(self,after,size):
+    def read(self,after,size,overlay_path=None):
         with self.lock:
-            self.size=size
+            self.size=size;self.overlay_path=overlay_path
             return self.latest if self.latest and self.latest['sequence']>after else None
 
     def close(self):
@@ -244,6 +278,9 @@ class Desktop(tk.Tk):
         self.record=tk.BooleanVar(value=False)
         self.raw=tk.BooleanVar(value=False)
         self.preview=tk.BooleanVar(value=True)
+        self.show_boxes=tk.BooleanVar(value=saved.get('show_boxes',True))
+        self.log_follow=tk.BooleanVar(value=True)
+        self.video_window=None;self.video_screen=None;self.output_window=None;self.output_log=None
         self.status=tk.StringVar(value='Ready')
         self.update_status=tk.StringVar(value='Update check pending')
         self.latest_release=None
@@ -420,16 +457,28 @@ class Desktop(tk.Tk):
             metric.grid(row=0,column=col,sticky='nsew',padx=(0,8 if col<2 else 0))
             ttk.Label(metric,text=title,style='CardMuted.TLabel').pack(anchor='w')
             ttk.Label(metric,textvariable=var,style='Metric.TLabel').pack(anchor='w',pady=(5,0))
-        video=ttk.Frame(work,style='Card.TFrame',padding=14);video.grid(row=2,column=0,sticky='nsew')
+        self.live_panes=ttk.Panedwindow(work,orient='vertical')
+        self.live_panes.grid(row=2,column=0,sticky='nsew')
+        video=ttk.Frame(self.live_panes,style='Card.TFrame',padding=14)
+        self.live_panes.add(video,weight=4)
         video.columnconfigure(0,weight=1);video.rowconfigure(1,weight=1)
-        ttk.Label(video,text='LIVE CAPTURE',style='Section.TLabel').grid(row=0,column=0,sticky='w',pady=(0,10))
+        video_tools=ttk.Frame(video);video_tools.grid(row=0,column=0,sticky='ew',pady=(0,10))
+        ttk.Label(video_tools,text='LIVE CAPTURE',style='Section.TLabel').pack(side='left')
+        ttk.Checkbutton(video_tools,text='Meter boxes',variable=self.show_boxes).pack(side='left',padx=10)
+        ttk.Button(video_tools,text='Windowed',command=self._open_video).pack(side='right')
+        ttk.Button(video_tools,text='Fullscreen',command=lambda:self._open_video(True)).pack(side='right',padx=5)
         self.screen=ttk.Label(video,text='Start Capture to view your console.\n\nStart AI Detection separately when you are ready.',style='Video.TLabel',anchor='center')
         self.screen.grid(row=1,column=0,sticky='nsew')
         ttk.Label(video,textvariable=self.display_metrics,style='CardMuted.TLabel',wraplength=520).grid(row=3,column=0,sticky='w',pady=(0,4))
         ttk.Label(video,textvariable=self.live_metrics,style='CardMuted.TLabel',wraplength=650).grid(row=2,column=0,sticky='w',pady=(10,0))
         ttk.Label(work,textvariable=self.bridge_status,style='Muted.TLabel',wraplength=700).grid(row=3,column=0,sticky='w',pady=10)
-        self.log=scrolledtext.ScrolledText(work,height=4,state='disabled',background='#0b141f',foreground='#9eb4ca',insertbackground='#e6edf5',relief='flat',font=('Consolas',9))
-        self.log.grid(row=4,column=0,sticky='ew')
+        output=ttk.Frame(self.live_panes,padding=(0,8,0,0));self.live_panes.add(output,weight=1)
+        output_tools=ttk.Frame(output);output_tools.pack(fill='x')
+        ttk.Label(output_tools,text='OUTPUT — drag the divider above to resize',style='Muted.TLabel').pack(side='left')
+        ttk.Button(output_tools,text='Pop out',command=self._open_output).pack(side='right')
+        ttk.Checkbutton(output_tools,text='Follow output',variable=self.log_follow).pack(side='right',padx=8)
+        self.log=self._new_output(output,height=7)
+        self.log.pack(fill='both',expand=True,pady=(5,0))
         bridge_sidebar,bridge_controls=self._scroll_panel(live,width=285)
         bridge_sidebar.grid(row=0,column=2,sticky='nsew',padx=(14,0))
         device_card=self._card(bridge_controls,'TITAN BRIDGE')
@@ -986,6 +1035,7 @@ class Desktop(tk.Tk):
             gtuner_python=self.gtuner_python.get(),gtuner_path=self.gtuner_path.get(),auto_gtuner=self.auto_gtuner.get(),
             titan_slot=self.titan_slot.get(),auto_slot=self.auto_slot.get(),
             capture_type=self.capture_type.get(),render_mode=self.render_mode.get(),display_fps=self.display_fps.get(),
+            show_boxes=self.show_boxes.get(),
             green=dict(green,armed=False)),indent=2),encoding='utf-8')
 
     def _out(self,prefix):
@@ -1395,6 +1445,66 @@ class Desktop(tk.Tk):
             self.bridge_setup_status.set('Bridge lost. Trigger disabled; capture and AI continue while reconnecting.')
             self.after(1000,self._retry_bridge)
 
+    @staticmethod
+    def _new_output(parent,**options):
+        return scrolledtext.ScrolledText(parent,state='disabled',background='#0b141f',foreground='#9eb4ca',
+            insertbackground='#e6edf5',relief='flat',font=('Consolas',10),**options)
+
+    def _open_output(self):
+        if self.output_window is not None:
+            self.output_window.deiconify();self.output_window.lift();return
+        window=self.output_window=tk.Toplevel(self)
+        window.title('NBA2K CV — Output');window.geometry('1000x600');window.minsize(400,200)
+        self.output_log=self._new_output(window)
+        self.output_log.pack(fill='both',expand=True)
+        self.output_log.configure(state='normal')
+        self.output_log.insert('end',self.log.get('1.0','end-1c'))
+        self.output_log.configure(state='disabled');self.output_log.see('end')
+        def close():
+            self.output_log=None;self.output_window=None;window.destroy()
+        window.protocol('WM_DELETE_WINDOW',close)
+
+    def _video_target(self):
+        return self.video_screen if self.video_window is not None else self.screen
+
+    def _open_video(self,fullscreen=False):
+        if self.video_window is None:
+            window=self.video_window=tk.Toplevel(self)
+            window.title('NBA2K CV — Live capture');window.geometry('1280x760');window.minsize(480,300)
+            tools=ttk.Frame(window,padding=6);tools.pack(fill='x')
+            ttk.Button(tools,text='Dock video',command=self._dock_video).pack(side='left')
+            ttk.Button(tools,text='Toggle fullscreen (F11)',command=self._toggle_video_fullscreen).pack(side='left',padx=8)
+            ttk.Label(tools,text='Esc exits fullscreen',style='Muted.TLabel').pack(side='left')
+            self.video_screen=ttk.Label(window,anchor='center',style='Video.TLabel',text='Waiting for live capture…')
+            self.video_screen.pack(fill='both',expand=True)
+            window.protocol('WM_DELETE_WINDOW',self._dock_video)
+            window.bind('<Escape>',lambda event:window.attributes('-fullscreen',False))
+            window.bind('<F11>',lambda event:self._toggle_video_fullscreen())
+            self.screen.configure(image='',text='Video is in a separate window. Close it to dock again.')
+            self.raw_preview_photo_size=None;self.last_preview_stamp=None
+        self.video_window.attributes('-fullscreen',bool(fullscreen))
+        self.video_window.deiconify();self.video_window.lift()
+
+    def _toggle_video_fullscreen(self):
+        if self.video_window is not None:
+            self.video_window.attributes('-fullscreen',not bool(self.video_window.attributes('-fullscreen')))
+
+    def _dock_video(self):
+        window=self.video_window
+        self.video_window=None;self.video_screen=None
+        self.raw_preview_photo_size=None;self.last_preview_stamp=None
+        if window is not None:window.destroy()
+
+    def _present_image(self,image):
+        from PIL import ImageTk
+        target=self._video_target()
+        if self.raw_preview_photo_size==image.size and hasattr(self.preview_image,'paste'):
+            self.preview_image.paste(image)
+        else:
+            self.preview_image=ImageTk.PhotoImage(image)
+            self.raw_preview_photo_size=image.size
+        target.configure(image=self.preview_image,text='')
+
     def _preview_tick(self):
         if not self.live_active or not self.active_out:return
         try:
@@ -1415,11 +1525,11 @@ class Desktop(tk.Tk):
             image=self.active_out/'preview.png'
             stamp=image.stat().st_mtime_ns
             if stamp!=self.last_preview_stamp:
-                photo=tk.PhotoImage(file=str(image))
-                width=max(1,self.screen.winfo_width());height=max(1,self.screen.winfo_height())
-                factor=max(1,(photo.width()+width-1)//width,(photo.height()+height-1)//height)
-                self.preview_image=photo.subsample(factor,factor)
-                self.screen.configure(image=self.preview_image,text="")
+                from PIL import Image
+                target=self._video_target()
+                with Image.open(image) as source:photo=source.convert('RGB')
+                photo.thumbnail((max(1,target.winfo_width()),max(1,target.winfo_height())))
+                self._present_image(photo)
                 self.last_preview_stamp=stamp
         except (OSError,ValueError,KeyError,tk.TclError):pass
 
@@ -1450,17 +1560,13 @@ class Desktop(tk.Tk):
             if display_out and self.preview.get():
                 if self.raw_preview is None and (display_out/'live_bgr.bin').exists():
                     self.raw_preview=PreviewWorker(display_out/'live_bgr.bin')
-                size=(max(1,self.screen.winfo_width()),max(1,self.screen.winfo_height()))
-                sample=self.raw_preview.read(self.raw_preview_sequence,size) if self.raw_preview else None
+                target=self._video_target()
+                size=(max(1,target.winfo_width()),max(1,target.winfo_height()))
+                overlay=(self.active_out/'live_status.json') if self.live_active and self.active_out and self.show_boxes.get() else None
+                sample=self.raw_preview.read(self.raw_preview_sequence,size,overlay) if self.raw_preview else None
                 if sample:
-                    from PIL import ImageTk
                     image=sample['image'];upload_start=time.perf_counter()
-                    if self.raw_preview_photo_size==image.size and hasattr(self.preview_image,'paste'):
-                        self.preview_image.paste(image)
-                    else:
-                        self.preview_image=ImageTk.PhotoImage(image)
-                        self.raw_preview_photo_size=image.size
-                        self.screen.configure(image=self.preview_image,text='')
+                    self._present_image(image)
                     self.preview_upload_ms=(time.perf_counter()-upload_start)*1000
                     self.preview_prepare_ms=sample['prepare_ms']
                     self.raw_preview_sequence=sample['sequence'];self.display_count+=1
@@ -1481,9 +1587,12 @@ class Desktop(tk.Tk):
         self.after(max(1,round(1000*(interval-(time.perf_counter()-started)))),self._display_tick)
 
     def _log(self,value):
-        self.log.configure(state='normal');self.log.insert('end',value)
-        if int(self.log.index('end-1c').split('.')[0])>2000:self.log.delete('1.0','501.0')
-        self.log.see('end');self.log.configure(state='disabled')
+        for widget in (self.log,self.output_log):
+            if widget is None:continue
+            widget.configure(state='normal');widget.insert('end',value)
+            if int(widget.index('end-1c').split('.')[0])>2000:widget.delete('1.0','501.0')
+            if self.log_follow.get():widget.see('end')
+            widget.configure(state='disabled')
 
     def _refresh(self):
         for item in self.runs.get_children():self.runs.delete(item)
