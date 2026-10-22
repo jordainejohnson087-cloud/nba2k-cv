@@ -41,6 +41,7 @@ def build(archive, repository):
                         (ROOT/'meter_green.py').read_text(encoding='utf-8'))
     resources = '\nGTUNER_SOURCE = ' + repr((ROOT/'bridge/gtuner_meter.py').read_text(encoding='utf-8'))
     resources += '\nHEARTBEAT_SOURCE = ' + repr((ROOT/'bridge/titan_heartbeat.gpc').read_text(encoding='utf-8')) + '\n'
+    resources += '\nCONSOLE_TEST_SOURCE = ' + repr((ROOT/'testing/console_button_check.py').read_text(encoding='utf-8')) + '\n'
     resources += '\nMETER_GPC_SOURCE = ' + repr((ROOT/'bridge/titan_meter.gpc').read_text(encoding='utf-8')) + '\n'
     live = live.replace("if __name__ == '__main__': main()", resources + "\nif __name__ == '__main__': main()")
     compile(live, 'run_live.py', 'exec')

@@ -510,6 +510,12 @@ class Desktop(tk.Tk):
         ttk.Button(device_card,text='Apply Shot Settings',command=self._apply_green).pack(fill='x',pady=4)
         ttk.Label(device_card,textvariable=self.bridge_status,style='CardMuted.TLabel',wraplength=235).pack(anchor='w',pady=8)
         ttk.Label(device_card,textvariable=self.bridge_next_step,style='CardMuted.TLabel',wraplength=235).pack(anchor='w',pady=8)
+        test_card=self._card(bridge_controls,'CONSOLE OUTPUT TEST')
+        ttk.Label(test_card,text='PowerShell sends one A/X tap using the manual test path. No meter or model is needed. Use a menu or practice session.',style='CardMuted.TLabel',wraplength=235).pack(anchor='w')
+        ttk.Button(test_card,text='Test A via PowerShell',command=lambda:self._console_tap('A')).pack(fill='x',pady=4)
+        ttk.Button(test_card,text='Test X via PowerShell',command=lambda:self._console_tap('X')).pack(fill='x',pady=4)
+        self.console_test_status=tk.StringVar(value='No console test requested')
+        ttk.Label(test_card,textvariable=self.console_test_status,style='CardMuted.TLabel',wraplength=235).pack(anchor='w',pady=4)
         slots_card=self._card(bridge_controls,'MEMORY SLOTS')
         ttk.Combobox(slots_card,textvariable=self.titan_slot,values=('Auto (meter bridge)',*tuple(str(i) for i in range(1,10))),state='readonly',width=21).pack(fill='x',pady=4)
         ttk.Button(slots_card,text='Select & verify slot',command=self._bridge_slot_changed).pack(fill='x',pady=4)
@@ -671,13 +677,17 @@ class Desktop(tk.Tk):
         # compatible with the first desktop updater's fixed filename allowlist.
         folder=PROJECT/'bridge'
         if hasattr(__import__('run_live'),'METER_GPC_SOURCE'):
-            from run_live import GTUNER_SOURCE, HEARTBEAT_SOURCE, METER_GPC_SOURCE
+            from run_live import GTUNER_SOURCE, HEARTBEAT_SOURCE, METER_GPC_SOURCE, CONSOLE_TEST_SOURCE
             folder.mkdir(exist_ok=True)
             (folder/'gtuner_meter.py').write_text(GTUNER_SOURCE,encoding='utf-8')
             (folder/'titan_heartbeat.gpc').write_text(HEARTBEAT_SOURCE,encoding='utf-8')
             (folder/'titan_meter.gpc').write_text(METER_GPC_SOURCE,encoding='utf-8')
+            (folder/'console_button_check.py').write_text(CONSOLE_TEST_SOURCE,encoding='utf-8')
         if not (folder/'titan_meter.gpc').is_file() or not (folder/'gtuner_meter.py').is_file():
             raise FileNotFoundError('The matching bridge scripts are missing; install the latest app update.')
+        diagnostic=folder/'console_button_check.py'
+        if not diagnostic.is_file() and (PROJECT/'testing/console_button_check.py').is_file():
+            diagnostic.write_text((PROJECT/'testing/console_button_check.py').read_text(encoding='utf-8'),encoding='utf-8')
         return folder
 
     def _open_bridge(self):
@@ -883,7 +893,7 @@ class Desktop(tk.Tk):
                     else:
                         result=current
                     if not result['ready'] and not read_only:
-                        error=result['stage']+'. Connect Titan PROG to this PC, compile and install the updated bridge 3.1 titan_meter.gpc in the selected slot, and start bridge/gtuner_meter.py in Gtuner Computer Vision with Null Video Input. Keep that worker running; opening the files alone does not start it. Console OUTPUT/authentication is separate.'
+                        error=result['stage']+'. Connect Titan PROG to this PC, compile and install the updated bridge 3.2 titan_meter.gpc in the selected slot, and start bridge/gtuner_meter.py in Gtuner Computer Vision with Null Video Input. Keep that worker running; opening the files alone does not start it. Console OUTPUT/authentication is separate.'
                 if found and result is not None:result=dict(result,gtuner_path=str(found))
             except Exception as exc:
                 error=str(exc);result=service.status()
@@ -894,6 +904,51 @@ class Desktop(tk.Tk):
             if still_current():self.messages.put(('bridge_prepared',(False,dict(result or {},prepare_generation=generation),error,slots)))
         self.after(12000,lambda:self._bridge_prepare_timeout(generation))
         threading.Thread(target=work,daemon=True).start()
+
+    def _console_tap(self,button):
+        if button not in ('A','X') or getattr(self,'console_test_busy',False):return
+        if sys.platform!='win32':
+            self.console_test_status.set('PowerShell console tests require Windows.');return
+        if time.monotonic()-getattr(self,'console_test_at',-10)<1:
+            self.console_test_status.set('Wait one second between console tests.');return
+        service=self.bridge_service
+        status=service.status() if service else {}
+        if not status.get('ready') or type(status.get('device_test_count')) is not int:
+            self.console_test_status.set('Connect bridge 3.2 and restart the updated gtuner_meter worker first.');return
+        if not status.get('test_available'):
+            self.console_test_status.set('Test port 26741 unavailable. Stop the separate console_button_check worker, then restart gtuner_meter.');return
+        self._disarm_shots()
+        try:
+            script=self._export_bridge()/'console_button_check.py'
+            if not script.is_file():raise OSError('Matching console test sender is missing')
+            command=BridgeProcess.powershell_command(sys.executable,[str(script),'--tap',button])
+        except OSError as exc:
+            self.console_test_status.set(str(exc));return
+        self.console_test_busy=True;self.console_test_at=time.monotonic()
+        self.console_test_status.set('PowerShell: sending one '+button+' tap...')
+        baseline=status['device_test_count']
+        def send():
+            result='';log=''
+            try:
+                deadline=time.monotonic()+2
+                while service.status().get('output_allowed',True):
+                    if time.monotonic()>=deadline:raise OSError('Could not confirm shots disarmed; test was not sent')
+                    time.sleep(.02)
+                outcome=subprocess.run(command,capture_output=True,text=True,timeout=8,
+                    creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+                log=outcome.stdout+outcome.stderr
+                if outcome.returncode:raise OSError('PowerShell sender failed: '+log.strip())
+                deadline=time.monotonic()+2
+                while time.monotonic()<deadline:
+                    current=service.status()
+                    if (current.get('ready') and type(current.get('device_test_count')) is int
+                        and current['device_test_count']!=baseline and current.get('device_test_button')=={'A':1,'X':2}[button]):
+                        result='Titan reports issuing '+button+' (100 ms). Check the Xbox screen; Xbox receipt is unverified.';break
+                    time.sleep(.025)
+                if not result:result='PowerShell sent '+button+', but Titan did not acknowledge executing it. Check the bridge 3.2 script and GCV worker. No retry was sent.'
+            except (OSError,subprocess.SubprocessError) as exc:result=str(exc)
+            self.messages.put(('console_test_done',(result,log)))
+        threading.Thread(target=send,daemon=True).start()
 
     def _green_values(self):
         defaults=green_config()
@@ -940,6 +995,7 @@ class Desktop(tk.Tk):
         return None
 
     def _arming_blocker(self):
+        if getattr(self,'console_test_busy',False):return 'Wait for the console output test to finish before arming.'
         if self.preparing_bridge:return 'Wait for bridge preparation before arming.'
         if not self.capture_active or not self._capture_ready():return 'Start a live capture before arming.'
         if not self.live_active or not self._detector_status():return 'Wait for fresh AI detections before arming.'
@@ -1401,6 +1457,10 @@ class Desktop(tk.Tk):
             for _ in range(64):
                 kind,value=self.messages.get_nowait()
                 if kind=='text':self._log(value)
+                elif kind=='console_test_done':
+                    self.console_test_busy=False
+                    result,log=value;self.console_test_status.set(result)
+                    self._log('\nConsole test: '+result+'\n'+log+'\n')
                 elif kind=='gtuner_python_checked':
                     self.checking_gtuner_python=False
                     if value.get('error'):self.gtuner_python_status.set(value['error'])
@@ -1506,7 +1566,7 @@ class Desktop(tk.Tk):
             def health(process):
                 return ('running / PID '+str(getattr(process,'pid','—'))) if process and process.poll() is None else 'stopped'
             bridge=getattr(self,'bridge_service',None)
-            self.component_status.set('Capture: '+health(self.capture_process)+'\nEngine: '+health(self.process if self.live_active else None)+'\nModel: '+Path(self.model.get()).name+'\nBridge: '+health(getattr(bridge,'process',None)))
+            self.component_status.set('Capture: '+health(self.capture_process)+'\nEngine: '+health(self.process if self.live_active else None)+'\nModel: '+Path(self.model.get()).name+'\nBridge: '+health(getattr(bridge,'process',None))+' / '+getattr(bridge,'transport','Python'))
         self._bridge_tick()
         self._preview_tick()
         self.after(100,self._poll)

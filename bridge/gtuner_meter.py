@@ -11,6 +11,7 @@ import time
 import sys
 
 PORT = 26740
+TEST_PORT = 26741
 STALE_SECONDS = .25
 
 
@@ -52,6 +53,14 @@ class GCVWorker:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(('127.0.0.1', PORT))
         self.socket.setblocking(False)
+        self.test_socket=None;self.test_reset=False;self.last_test=-1.0
+        self.device_test_count=None;self.device_test_button=None
+        candidate=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
+        try:
+            candidate.bind(('127.0.0.1',TEST_PORT));candidate.setblocking(False)
+            self.test_socket=candidate
+        except OSError as exc:
+            candidate.close();print('Console test port unavailable: '+str(exc),flush=True)
         self.callback_seen=False;self.packet_seen=False
         print('NBA2K CV bridge v3: Python '+sys.version.split()[0]+'; UDP 127.0.0.1:'+str(PORT)+' bound. Waiting for GCV callbacks.',flush=True)
         self.packet = {}
@@ -77,10 +86,12 @@ class GCVWorker:
                 if text.startswith('T2CV:'):
                     parts=text[5:].strip().split(':')
                     counter = int(parts[0])
-                    if len(parts) in (3,4,5):
+                    if len(parts) in (3,4,5,7):
                         self.device_sequence=int(parts[1]);self.device_event=int(parts[2])
-                    self.active_slot=int(parts[3]) if len(parts) in (4,5) and 1<=int(parts[3])<=9 else None
-                    self.device_protocol=int(parts[4]) if len(parts)==5 else None
+                    self.active_slot=int(parts[3]) if len(parts) in (4,5,7) and 1<=int(parts[3])<=9 else None
+                    self.device_protocol=int(parts[4]) if len(parts) in (5,7) else None
+                    self.device_test_count=int(parts[5]) if len(parts)==7 else None
+                    self.device_test_button=int(parts[6]) if len(parts)==7 else None
                     if counter != self.hardware_counter:
                         self.hardware_counter = counter
                         self.last_hardware = now
@@ -112,15 +123,37 @@ class GCVWorker:
                     print('NBA2K CV bridge: valid app telemetry received; sending acknowledgments.',flush=True)
                 self.last_packet = now
                 ack = dict(session=packet['session'],seq=packet['seq'],worker_protocol=3,device_protocol=self.device_protocol,
+                    test_available=self.test_socket is not None,device_test_count=self.device_test_count,device_test_button=self.device_test_button,
                     hardware_counter=self.hardware_counter,active_slot=self.active_slot,device_sequence=self.device_sequence,device_event=self.device_event,
                     hardware_age_ms=(now-self.last_hardware)*1000 if self.last_hardware is not None else None)
                 self.socket.sendto(json.dumps(ack).encode(),peer)
             except (ValueError,TypeError,AttributeError,OverflowError):
                 continue
+        # Exact T2TEST command used by the working manual PowerShell sender.
+        # One callback command + one neutral callback, never retry a tap.
+        command=0;neutral=self.test_reset;self.test_reset=False
+        if self.test_socket is not None:
+            for _ in range(8):
+                try:data,_=self.test_socket.recvfrom(128)
+                except BlockingIOError:break
+                try:
+                    prefix,button,stamp=data.decode('ascii').split(':')
+                    age=time.time()-float(stamp)
+                    armed=self.packet.get('trigger',{}).get('armed',False) and now-self.last_packet<STALE_SECONDS
+                    if (not neutral and not command and not armed and now-self.last_test>=.8
+                        and prefix=='T2TEST' and button in ('A','X') and 0<=age<=.5):
+                        command={'A':1,'X':2}[button]
+                except (ValueError,UnicodeError):pass
+        if command:
+            self.last_test=now;self.test_reset=True
+            print('CONSOLE TEST: forwarding one '+('A' if command==1 else 'X')+' tap to Titan; Xbox receipt unverified.',flush=True)
+            return frame,bytearray((84,49,command))
+        if neutral:return frame,bytearray((84,49,0))
         return frame, encode(self.packet, now-self.last_packet < STALE_SECONDS and
                              0<=time.time()-self.packet.get('sent_at',0)<=STALE_SECONDS)
 
     def __del__(self):
         sock = getattr(self,'socket',None)
-        if sock is not None:
-            sock.close()
+        if sock is not None:sock.close()
+        test_sock=getattr(self,'test_socket',None)
+        if test_sock is not None:test_sock.close()

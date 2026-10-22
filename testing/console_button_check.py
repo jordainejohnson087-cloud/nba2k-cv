@@ -56,9 +56,11 @@ class GCVWorker:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--tap', required=True, choices=('A', 'X'))
+    parser.add_argument('--port',type=int,default=PORT,help='Loopback test port (normally 26741)')
     args = parser.parse_args()
+    if not 1<=args.port<=65535:parser.error('Port must be 1 through 65535')
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        sock.sendto(('T2TEST:' + args.tap + ':' + str(time.time())).encode('ascii'), ('127.0.0.1', PORT))
+        sock.sendto(('T2TEST:' + args.tap + ':' + str(time.time())).encode('ascii'), ('127.0.0.1', args.port))
     print('Sent one ' + args.tap + ' request. Check Gtuner output and the Xbox screen; sending alone does not confirm delivery.')
 
 

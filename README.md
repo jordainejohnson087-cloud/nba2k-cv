@@ -1,5 +1,15 @@
 # NBA 2K shot-meter CV pipeline
 
+## Integrated PowerShell console-output tests (2026102203)
+
+On Windows, the app now launches the persistent model-free bridge host through **PowerShell → the app's Python environment**. Arguments are passed as quoted literals in a UTF-16LE encoded command; the app does not launch PowerShell once per video frame. The owner lease still shuts down the Python host on app exit. The GPU detector, capture and Gtuner USB host retain their existing independent roles.
+
+In Live Detection, the right sidebar has **CONSOLE OUTPUT TEST → Test A via PowerShell / Test X via PowerShell**. These buttons run the same Python sender and `T2TEST:A/X:<timestamp>` loopback UDP protocol on port **26741** that worked in the manual console test. Each test disarms meter output first and sends exactly one 100 ms tap, without retrying uncertain delivery. Capture and the detector are not needed. Arming is blocked while a test is outstanding. The status distinguishes sender completion, a new matching Titan execution counter, and unverified Xbox receipt.
+
+**Install the new bridge 3.2 `titan_meter.gpc` once and restart the updated `gtuner_meter` CV worker.** The normal worker now also receives the manual protocol, and the meter GPC handles its A/X commands using the original diagnostic combinations. No separate test slot or CV script switching is needed. Stop any old standalone `console_button_check` worker that owns port 26741. The app refuses to claim an unsupported old GPC has executed a test. Normal meter packets remain protocol v3; the heartbeat adds the independent manual-test counter and button.
+
+Use a menu or practice session for the explicit button test. If Titan reports issuing A but Xbox does not respond, investigate the Titan OUTPUT cable, authentication and console configuration. If A works while meter shots do not, inspect the selected mode, physical hold, armed state and green detector measurements. PowerShell is the launcher/sender, not a replacement for the Gtuner/Titan USB connection. Software tests and native PowerShell checks cannot confirm a physical Xbox action or a successful shot.
+
 ## GPC2 numeric-type fix (2026102202)
 
 Bridge **3.1** fixes the vendor compilation errors on direct `get_actual()` comparisons: that API returns `fix32`, so RS/X thresholds now use decimal literals (`50.0`, `-50.0`, `0.0`, `-20.0`, `20.0`). Shooting mechanics and wire protocol v3 are unchanged. Export the matching scripts from the updated app and compile/install `titan_meter.gpc` again. The original host shim returned integers and missed this restriction; it now returns a distinct fixed-point stand-in that rejects comparisons with integer literals. Host/Windows tests still do not replace compilation in Gtuner or console validation.

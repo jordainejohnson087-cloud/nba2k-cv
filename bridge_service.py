@@ -2,6 +2,7 @@
 
 The API is an app-side transport, not a replacement for Gtuner's USB host.
 """
+import base64
 import http.client
 import http.server
 import json
@@ -134,7 +135,7 @@ class BridgeService:
         elif not slot_valid:stage='Titan slot echo missing; install the current meter GPC'
         elif not matching:stage='Selected Titan slot does not match'
         else:stage='Titan bridge verified; console output unverified'
-        return dict(value,api='running',enabled=self.enabled,ready=ready,stage=stage,last_error=self.error)
+        return dict(value,api='running',enabled=self.enabled,output_allowed=self.output_allowed,ready=ready,stage=stage,last_error=self.error)
 
     def configure(self,enabled=None,expected_slot=_KEEP_EXPECTED_SLOT):
         if expected_slot is not _KEEP_EXPECTED_SLOT and expected_slot is not None and (type(expected_slot) is not int or not 1<=expected_slot<=9):
@@ -263,6 +264,20 @@ def unavailable_bridge(reason):
 
 class BridgeProcess:
     """UI supervisor. All socket requests run on its control thread, never Tk."""
+    @staticmethod
+    def powershell_command(executable,arguments):
+        # Fixed executable + individually quoted arguments; never shell=True.
+        root=Path(os.environ.get('SystemRoot',r'C:\Windows'))
+        installed=root/'System32'/'WindowsPowerShell'/'v1.0'/'powershell.exe'
+        shell=str(installed) if installed.is_file() else shutil.which('powershell.exe') or shutil.which('pwsh')
+        if not shell:raise OSError('PowerShell is unavailable')
+        executable=Path(executable)
+        if executable.name.lower()=='pythonw.exe':executable=executable.with_name('python.exe')
+        def quote(value):return "'"+str(value).replace("'","''")+"'"
+        command='& '+' '.join(quote(value) for value in [executable,*arguments])+'; exit $LASTEXITCODE'
+        encoded=base64.b64encode(command.encode('utf-16-le')).decode('ascii')
+        return [shell,'-NoProfile','-NonInteractive','-EncodedCommand',encoded]
+
     def __init__(self,executable,runtime,port=26740):
         self.folder=Path(tempfile.mkdtemp(prefix='nba2k-bridge-'))
         self.config=self.folder/'api.json';self.lease=self.folder/'owner.lease';self.lease.touch()
@@ -270,8 +285,11 @@ class BridgeProcess:
         self.cached=unavailable_bridge('Bridge process starting');self.updated=0
         self.process=None;self.thread=None;self.heartbeat=None
         try:
-            self.process=subprocess.Popen([str(executable),str(runtime),'--bridge-host',str(self.config),
-                '--bridge-lease',str(self.lease),'--bridge-port',str(port)],
+            arguments=[str(runtime),'--bridge-host',str(self.config),
+                '--bridge-lease',str(self.lease),'--bridge-port',str(port)]
+            self.transport='PowerShell → Python' if os.name=='nt' else 'Python'
+            command=self.powershell_command(executable,arguments) if os.name=='nt' else [str(executable),*arguments]
+            self.process=subprocess.Popen(command,
                 stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
                 creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0) if os.name=='nt' else 0)
             self.heartbeat=threading.Thread(target=self._heartbeat,daemon=True);self.heartbeat.start()

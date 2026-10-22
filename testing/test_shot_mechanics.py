@@ -21,6 +21,8 @@ class ShotMechanicsTests(unittest.TestCase):
         source=(Path(__file__).resolve().parents[1]/'bridge/titan_meter.gpc').read_text()
         source=re.sub(r'^#.*$', '', source, flags=re.M)
         source=source.replace('main {','void tick() {').replace('    combo_run(Heartbeat);','')
+        source=source.replace('combo_run(ConsoleTapA);','test_tap=16;').replace('combo_run(ConsoleTapX);','test_tap=17;')
+        source=re.sub(r'combo (?:ConsoleTapA|ConsoleTapX) \{.*?\n\}', '', source, flags=re.S)
         source=re.sub(r'combo Heartbeat \{.*?\n\}', '', source, flags=re.S)
         prelude='''
 #include <cstdint>
@@ -33,7 +35,7 @@ using int8=int8_t; using int16=int16_t;
 #define BUTTON_17 17
 #define PS4_RY 20
 #define PS4_R3 6
-int actual[32], output[32], delta; bool fresh=true; uint8 bytes[26];
+int test_tap=0; int actual[32], output[32], delta; bool fresh=true; uint8 bytes[26];
 int elapsed_time(){return delta;}
 // GPC2 disallows implicit int/fix32 comparisons; C++ normally permits them.
 struct fix32 {
@@ -57,20 +59,22 @@ uint8 cv_byte(uint8 offset);
 '''
         harness='''
 int main(){
- int arm,seen,green_value,mode,event,x,ry,r3,dt,dir,deliver,version;
+ int arm,seen,green_value,mode,event,x,ry,r3,dt,dir,deliver,version,legacy;
  unsigned seq=0;
- while(std::cin>>arm>>seen>>green_value>>mode>>event>>x>>ry>>r3>>dt>>dir>>deliver>>version){
+ while(std::cin>>arm>>seen>>green_value>>mode>>event>>x>>ry>>r3>>dt>>dir>>deliver>>version>>legacy){
   delta=dt; fresh=deliver; ++seq;
   bytes[0]=0;bytes[1]=77;bytes[2]=version;bytes[3]=seen;
   bytes[4]=arm;bytes[5]=green_value;bytes[6]=dir;
   bytes[7]=0;bytes[8]=45;bytes[9]=0;bytes[10]=100;
   for(int n=0;n<4;++n){bytes[11+n]=(event>>(24-8*n))&255;bytes[19+n]=(seq>>(24-8*n))&255;}
   bytes[23]=0;bytes[24]=100;bytes[25]=mode;
+  if(legacy){bytes[0]=84;bytes[1]=49;bytes[2]=legacy==3?0:legacy;}
+  test_tap=0;
   for(int n=0;n<32;++n){actual[n]=0;output[n]=0;}
   actual[17]=x;actual[20]=ry;actual[6]=r3;actual[4]=70;actual[5]=40;
   for(int n=0;n<32;++n)output[n]=actual[n];
   tick();
-  std::cout<<output[17]<<" "<<output[20]<<" "<<output[4]<<" "<<output[5]<<" "<<int(phase)<<" "<<fired_event<<" "<<blocked<<"\\n";
+  std::cout<<output[17]<<" "<<output[20]<<" "<<output[4]<<" "<<output[5]<<" "<<int(phase)<<" "<<fired_event<<" "<<blocked<<" "<<test_counter<<" "<<int(test_button)<<" "<<test_tap<<"\\n";
  }
 }
 '''
@@ -93,7 +97,7 @@ int main(){
     def run_frames(self,frames,mode=0):
         rows=[]
         for frame in frames:
-            values=dict(arm=1,seen=0,green=0,mode=mode,event=0,x=0,ry=0,r3=0,dt=5,direction=0,deliver=1,version=3)
+            values=dict(arm=1,seen=0,green=0,mode=mode,event=0,x=0,ry=0,r3=0,dt=5,direction=0,deliver=1,version=3,legacy=0)
             values.update(frame)
             rows.append(' '.join(str(value) for value in values.values()))
         result=subprocess.run([str(self.binary)],input='\n'.join(rows)+'\n',capture_output=True,text=True,timeout=5,check=True)
@@ -101,6 +105,12 @@ int main(){
         self.assertEqual(len(outputs),len(frames))
         self.assertTrue(all(row[2:4]==[70,40] for row in outputs),'RT and movement changed')
         return outputs
+
+    def test_manual_a_x_protocol_bypasses_meter_gating_once_and_cancels_shots(self):
+        out=self.run_frames([{},dict(legacy=1),dict(legacy=1),dict(legacy=3),dict(legacy=2),{}])
+        self.assertEqual([r[7] for r in out],[0,1,1,1,2,2])
+        self.assertEqual([r[9] for r in out],[0,16,0,0,17,0])
+        self.assertTrue(out[1][6]);self.assertEqual(out[1][4],0)
 
     def test_timing_passes_x_then_releases_until_physical_release_without_rs(self):
         out=self.run_frames([{},dict(x=100,seen=1),dict(x=100,seen=1,green=1,event=1),

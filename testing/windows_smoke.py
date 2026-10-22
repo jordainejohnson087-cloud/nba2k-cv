@@ -125,6 +125,11 @@ def main():
                     app._launch_gtuner()
                     assert launch.call_args.args[0]==[str(gtuner),str(out/'titan_meter.gpc'),str(out/'gtuner_meter.py')]
                     assert app.gtuner_launched
+                # The console diagnostic is part of the real desktop, not a separate shell workflow.
+                assert app.console_test_status.get()=='No console test requested'
+                with patch.object(app.bridge_service,'status',return_value={'ready':False}):
+                    app._console_tap('A')
+                    assert 'bridge 3.2' in app.console_test_status.get()
                 # Start Capture needs neither a model nor the selected CUDA environment.
                 capture_folder=out/'capture_only';capture_folder.mkdir()
                 app.model.set(str(out/'missing.pt'));app.environment.set('missing-python.exe')

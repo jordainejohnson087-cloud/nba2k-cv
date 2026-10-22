@@ -45,13 +45,14 @@ class SessionTests(unittest.TestCase):
             self.assertTrue(ui.capture_active);self.assertTrue(ui.live_active)
 
     def test_arming_rejects_stale_engine_missing_capture_wrong_bridge_and_preparation(self):
-        for condition in ('stale','capture','bridge','preparing'):
+        for condition in ('stale','capture','bridge','preparing','console_test'):
             with self.subTest(condition=condition),tempfile.TemporaryDirectory() as folder:
                 out=Path(folder);ui=self.ui(out)
                 if condition=='stale':(out/'live_status.json').write_text(json.dumps(dict(timestamp=time.time()-5)))
                 if condition=='capture':ui._capture_ready.return_value=False
                 if condition=='bridge':ui.bridge_service.status.return_value=dict(ready=False)
                 if condition=='preparing':ui.preparing_bridge=True
+                if condition=='console_test':ui.console_test_busy=True
                 ui._arm_shots()
                 self.assertFalse(ui.trigger_armed.get())
                 ui.bridge_service.allow_output.assert_called_with(False)

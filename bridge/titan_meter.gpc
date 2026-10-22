@@ -1,4 +1,4 @@
-#pragma METAINFO("NBA2K CV Meter Bridge", 3, 1, "NBA2K CV")
+#pragma METAINFO("NBA2K CV Meter Bridge", 3, 2, "NBA2K CV")
 #include <PS4.gph>
 // App v3 only: Rhythm = physical RS hold then flick; Timing = X hold/release.
 // RT, movement and unrelated buttons are never rewritten.
@@ -28,108 +28,139 @@ bool blocked = TRUE;
 bool holding;
 uint8 shot_mode;
 uint8 incoming_mode;
+uint8 test_command;
+uint8 test_previous;
+uint8 test_button;
+uint32 test_counter;
+bool manual_packet;
 
 main {
     combo_run(Heartbeat);
-    if(packet_age < 1000) packet_age += elapsed_time();
+    manual_packet = FALSE;
     if(gcv_ready()) {
-        if(cv_byte(0) == 0 && cv_byte(1) == 77 && cv_byte(2) == 3) {
-            incoming_seq = ((uint32)cv_byte(19) << 24) | ((uint32)cv_byte(20) << 16)
-                         | ((uint32)cv_byte(21) << 8) | (uint32)cv_byte(22);
-            if(incoming_seq != packet_seq) {
-                packet_seq = incoming_seq;
-                packet_age = 0;
-                incoming_mode = cv_byte(25);
-                if(incoming_mode != shot_mode) blocked = TRUE;
-                shot_mode = incoming_mode;
-                armed = cv_byte(4) == 1;
-                observed = cv_byte(3) == 1;
-                green = cv_byte(3) == 1 && cv_byte(5) == 1;
-                flick_value = -100;
-                if(cv_byte(6) == 1) flick_value = 100;
-                delay_ms = ((uint16)cv_byte(7) << 8) | (uint16)cv_byte(8);
-                hold_ms = ((uint16)cv_byte(9) << 8) | (uint16)cv_byte(10);
-                event_id = ((uint32)cv_byte(11) << 24) | ((uint32)cv_byte(12) << 16)
-                         | ((uint32)cv_byte(13) << 8) | (uint32)cv_byte(14);
-                ttl = ((uint16)cv_byte(23) << 8) | (uint16)cv_byte(24);
-                if(shot_mode > 1 || delay_ms > 250 || hold_ms < 10 || hold_ms > 500 || ttl < 25 || ttl > 250) armed = FALSE;
-            }
-        } else { armed = FALSE; }
+        if(cv_byte(0) == 84 && cv_byte(1) == 49) manual_packet = TRUE;
     }
-    // get_actual returns fix32: compare it with decimal (fix32) thresholds.
-    // A direction uses the opposite physical hold to begin the rhythm shot.
-    holding = (flick_value < 0 && get_actual(PS4_RY) >= 50.0)
-           || (flick_value > 0 && get_actual(PS4_RY) <= -50.0);
-    if(shot_mode == 1) holding = get_actual(BUTTON_17) > 0.0;
-
-    // R3 cancels automation without remapping it to X or touching other inputs.
-    // After disarm, timeout, cancellation or mode change, require a release.
-    if(!armed || packet_age > ttl || get_actual(PS4_R3)) {
+    if(manual_packet) {
+        // The proven manual A/X protocol, independent of AI/green gating.
+        armed = FALSE;
         phase = 0;
-        shot_active = FALSE;
         blocked = TRUE;
-        fired = TRUE;
-        last_event = event_id;
-    } else if(blocked) {
-        phase = 0;
         shot_active = FALSE;
-        last_event = event_id;
-        if(!get_actual(BUTTON_17) && get_actual(PS4_RY) > -20.0 && get_actual(PS4_RY) < 20.0) {
-            blocked = FALSE;
-            fired = FALSE;
-        }
-    } else if(shot_mode == 1) {
-        // Physical X passes through until a fresh observed green event.
-        // Suppress it until physical release; never synthesize a second press.
-        if(!holding) {
-            shot_active = FALSE;
-            fired = FALSE;
-            last_event = event_id;
-        } else {
-            if(observed && !green && !fired) shot_active = TRUE;
-            if(shot_active && green && event_id != 0 && event_id != last_event && !fired) {
-                fired = TRUE;
-                last_event = event_id;
-                fired_event = event_id;
+        test_command = cv_byte(2);
+        if(test_command != test_previous) {
+            if(test_command == 1) {
+                test_counter++;
+                test_button = 1;
+                combo_run(ConsoleTapA);
+            } else if(test_command == 2) {
+                test_counter++;
+                test_button = 2;
+                combo_run(ConsoleTapX);
             }
-            if(fired) set_val(BUTTON_17, 0);
         }
+        test_previous = test_command;
     } else {
-        // Preserve the user's RS hold before green. Releasing early does not flick.
-        if(phase == 0 && !holding) {
+        if(gcv_ready()) test_previous = 0;
+        if(packet_age < 1000) packet_age += elapsed_time();
+        if(gcv_ready()) {
+            if(cv_byte(0) == 0 && cv_byte(1) == 77 && cv_byte(2) == 3) {
+                incoming_seq = ((uint32)cv_byte(19) << 24) | ((uint32)cv_byte(20) << 16)
+                             | ((uint32)cv_byte(21) << 8) | (uint32)cv_byte(22);
+                if(incoming_seq != packet_seq) {
+                    packet_seq = incoming_seq;
+                    packet_age = 0;
+                    incoming_mode = cv_byte(25);
+                    if(incoming_mode != shot_mode) blocked = TRUE;
+                    shot_mode = incoming_mode;
+                    armed = cv_byte(4) == 1;
+                    observed = cv_byte(3) == 1;
+                    green = cv_byte(3) == 1 && cv_byte(5) == 1;
+                    flick_value = -100;
+                    if(cv_byte(6) == 1) flick_value = 100;
+                    delay_ms = ((uint16)cv_byte(7) << 8) | (uint16)cv_byte(8);
+                    hold_ms = ((uint16)cv_byte(9) << 8) | (uint16)cv_byte(10);
+                    event_id = ((uint32)cv_byte(11) << 24) | ((uint32)cv_byte(12) << 16)
+                             | ((uint32)cv_byte(13) << 8) | (uint32)cv_byte(14);
+                    ttl = ((uint16)cv_byte(23) << 8) | (uint16)cv_byte(24);
+                    if(shot_mode > 1 || delay_ms > 250 || hold_ms < 10 || hold_ms > 500 || ttl < 25 || ttl > 250) armed = FALSE;
+                }
+            } else { armed = FALSE; }
+        }
+        // get_actual returns fix32: compare it with decimal (fix32) thresholds.
+        // A direction uses the opposite physical hold to begin the rhythm shot.
+        holding = (flick_value < 0 && get_actual(PS4_RY) >= 50.0)
+               || (flick_value > 0 && get_actual(PS4_RY) <= -50.0);
+        if(shot_mode == 1) holding = get_actual(BUTTON_17) > 0.0;
+
+        // R3 cancels automation without remapping it to X or touching other inputs.
+        // After disarm, timeout, cancellation or mode change, require a release.
+        if(!armed || packet_age > ttl || get_actual(PS4_R3)) {
+            phase = 0;
             shot_active = FALSE;
-            fired = FALSE;
+            blocked = TRUE;
+            fired = TRUE;
             last_event = event_id;
-        } else {
-            if(phase == 0 && observed && !green && !fired) shot_active = TRUE;
-            if(phase == 0 && holding && shot_active && green && event_id != 0 && event_id != last_event && !fired) {
-                fired = TRUE;
+        } else if(blocked) {
+            phase = 0;
+            shot_active = FALSE;
+            last_event = event_id;
+            if(!get_actual(BUTTON_17) && get_actual(PS4_RY) > -20.0 && get_actual(PS4_RY) < 20.0) {
+                blocked = FALSE;
+                fired = FALSE;
+            }
+        } else if(shot_mode == 1) {
+            // Physical X passes through until a fresh observed green event.
+            // Suppress it until physical release; never synthesize a second press.
+            if(!holding) {
+                shot_active = FALSE;
+                fired = FALSE;
                 last_event = event_id;
-                fired_event = event_id;
-                phase = 1;
-                phase_time = 0;
-                active_delay = delay_ms;
-                active_hold = hold_ms;
-                active_value = flick_value;
-            }
-            if(phase == 1) {
-                if(!holding) { phase = 3; }
-                else if(phase_time >= active_delay) { phase = 2; phase_time = 0; }
-                else phase_time += elapsed_time();
-            }
-            if(phase == 2) {
-                if(phase_time >= active_hold) { phase = 3; }
-                else phase_time += elapsed_time();
-            }
-            if(phase == 2) set_val(PS4_RY, active_value);
-            else if(phase == 1) set_val(PS4_RY, -active_value);
-            else if(phase == 3) {
-                set_val(PS4_RY, 0);
-                if(get_actual(PS4_RY) > -20.0 && get_actual(PS4_RY) < 20.0) {
-                    phase = 0;
-                    shot_active = FALSE;
-                    fired = FALSE;
+            } else {
+                if(observed && !green && !fired) shot_active = TRUE;
+                if(shot_active && green && event_id != 0 && event_id != last_event && !fired) {
+                    fired = TRUE;
                     last_event = event_id;
+                    fired_event = event_id;
+                }
+                if(fired) set_val(BUTTON_17, 0);
+            }
+        } else {
+            // Preserve the user's RS hold before green. Releasing early does not flick.
+            if(phase == 0 && !holding) {
+                shot_active = FALSE;
+                fired = FALSE;
+                last_event = event_id;
+            } else {
+                if(phase == 0 && observed && !green && !fired) shot_active = TRUE;
+                if(phase == 0 && holding && shot_active && green && event_id != 0 && event_id != last_event && !fired) {
+                    fired = TRUE;
+                    last_event = event_id;
+                    fired_event = event_id;
+                    phase = 1;
+                    phase_time = 0;
+                    active_delay = delay_ms;
+                    active_hold = hold_ms;
+                    active_value = flick_value;
+                }
+                if(phase == 1) {
+                    if(!holding) { phase = 3; }
+                    else if(phase_time >= active_delay) { phase = 2; phase_time = 0; }
+                    else phase_time += elapsed_time();
+                }
+                if(phase == 2) {
+                    if(phase_time >= active_hold) { phase = 3; }
+                    else phase_time += elapsed_time();
+                }
+                if(phase == 2) set_val(PS4_RY, active_value);
+                else if(phase == 1) set_val(PS4_RY, -active_value);
+                else if(phase == 3) {
+                    set_val(PS4_RY, 0);
+                    if(get_actual(PS4_RY) > -20.0 && get_actual(PS4_RY) < 20.0) {
+                        phase = 0;
+                        shot_active = FALSE;
+                        fired = FALSE;
+                        last_event = event_id;
+                    }
                 }
             }
         }
@@ -138,7 +169,7 @@ main {
 
 combo Heartbeat {
     wait(500);
-    printf("GCMD:ComputerVision.PY:T2CV:%d:%d:%d:%d:3", heartbeat_counter++, packet_seq, fired_event, mslot_get());
+    printf("GCMD:ComputerVision.PY:T2CV:%d:%d:%d:%d:3:%d:%d", heartbeat_counter++, packet_seq, fired_event, mslot_get(), test_counter, test_button);
 }
 
 // GPC2 gcv_read writes into a typed destination; it does not return a byte.
@@ -146,4 +177,18 @@ uint8 cv_byte(uint8 offset) {
     uint8 value;
     gcv_read(offset, &value);
     return value;
+}
+
+// Same one-shot combinations as the successful console-button test.
+combo ConsoleTapA {
+    set_val(BUTTON_16, 100);
+    wait(100);
+    set_val(BUTTON_16, 0);
+    wait(100);
+}
+combo ConsoleTapX {
+    set_val(BUTTON_17, 100);
+    wait(100);
+    set_val(BUTTON_17, 0);
+    wait(100);
 }
