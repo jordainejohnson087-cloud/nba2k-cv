@@ -1033,7 +1033,7 @@ class Desktop(tk.Tk):
                     current=service.status()
                     if (current.get('ready') and type(baseline) is int
                         and current.get('device_test_count')!=baseline and current.get('device_test_button')==5):
-                        result='Titan accepted AI X hold. Fresh green controls release; watch Titan action and Xbox.';break
+                        result='Titan accepted AI X hold. Fresh green controls release; watch AI release sent, bridge command and Xbox.';break
                     time.sleep(.025)
                 if not result:result='AI X hold was sent once but not acknowledged. Check the meter worker and script; no retry was sent.'
             except (OSError,subprocess.SubprocessError) as exc:result=str(exc)
@@ -1112,6 +1112,8 @@ class Desktop(tk.Tk):
         bridge=self.bridge_service.status()
         if not bridge.get('ready'):
             return 'Titan bridge is not ready: '+str(bridge.get('stage','connect and verify the bridge.'))
+        if bridge.get('output_path')!='console_release':
+            return 'Restart the updated gtuner_meter CV worker to use the tested console X-release path.'
         if type(bridge.get('device_gate')) is not int or not (bridge['device_gate'] & 256):
             return 'Install the exported X-only Titan meter bridge 3.4, then restart the updated gtuner_meter worker.'
         return None
@@ -1835,7 +1837,8 @@ class Desktop(tk.Tk):
                     elif gate & 8192:device_note+=' / AI X TIMEOUT — released without a green event'
                 self.green_status.set(f"{'ARMED' if trigger.get('armed') else 'DRY RUN'} | "
                     f"in green: {measurement.get('in_green',False)} | event {trigger.get('event_id',0)} | "
-                    f"Titan action {self.bridge_service.status().get('device_event',0) if self.bridge_service else 0} | {device_note} | "
+                    f"AI release sent {self.bridge_service.status().get('auto_release_event',0) if self.bridge_service else 0} | "
+                    f"Bridge command {self.bridge_service.status().get('device_test_button') if self.bridge_service else None} (3=X release) | {device_note} | "
                     f"{measurement.get('reason','')}" + (' • STALE' if age>.25 else ''))
             if self.capture_active or (self.active_out/'live_bgr.bin').exists():return
             image=self.active_out/'preview.png'

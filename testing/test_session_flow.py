@@ -21,7 +21,7 @@ class SessionTests(unittest.TestCase):
             capture_active=True,live_active=True,active_out=out,preparing_bridge=False,
             trigger_armed=Variable(False),release_status=Variable(''),bridge_enabled=Variable(True),status=Variable(''),session_status=Variable(''),
             bridge_service=Mock(),_save=Mock(),_capture_ready=Mock(return_value=True),after=Mock(),_live=Mock())
-        ui.bridge_service.status.return_value=dict(ready=True,device_gate=272)
+        ui.bridge_service.status.return_value=dict(ready=True,device_gate=272,output_path="console_release")
         for name in ('_session_tick','_detector_status','_arming_blocker','_apply_green','_arm_shots','_disarm_shots','_shot_mode_changed'):
             setattr(ui,name,MethodType(getattr(Desktop,name),ui))
         ui._green_values=lambda:green_config(dict(armed=ui.trigger_armed.get()))

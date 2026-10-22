@@ -1,5 +1,14 @@
 # NBA 2K shot-meter CV pipeline
 
+## AI uses the tested console release command (2026102210)
+
+Automatic Timing green events now emit exactly the same three-byte RELEASE_X command as the working manual PowerShell test. The persistent Gtuner worker sends it once per fresh eligible event; no new PowerShell process is started at the green frame. Titan still forwards controller output to Xbox. The separate native green-trigger output is disabled by the worker; rhythm remains deferred.
+
+Update the app and restart its exported `gtuner_meter.py` in Gtuner CV. Keep the existing meter GPC 3.6. Arming now checks that this updated worker is running. The display distinguishes **AI release sent** from **Bridge command 3 (X release)**; the former is a send marker, and the latter is the last command reported by the device. Neither alone proves the Xbox action or correct shot timing. The manual console test remains unchanged.
+
+The existing fresh/observed/valid/eligible/armed checks still apply. Release takes priority over a pending neutral callback, duplicate events are suppressed, and normal telemetry cannot also invoke the old shot path. Separate software regression tests exercise the real local API/UDP path; physical console validation remains necessary.
+
+
 ## Release validation startup fix (2026102209)
 
 The first publication attempt stopped in two bridge-process tests: cold Windows PowerShell/Python startup had not completed within their 3–4 second assertions. Tests now wait, with a 20-second maximum and early-exit diagnostics, for the first successful bridge API status before running the original live echo and slot checks. The separate two-second bridge verification deadline, parent-lease shutdown check and release validation gate remain intact. This is a test harness correction; the app's arming fix and runtime behavior are unchanged.

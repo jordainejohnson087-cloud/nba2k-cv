@@ -48,6 +48,11 @@ def encode(packet, fresh):
         trigger['event_id'],shot,packet.get('seq',0)&0xffffffff,max(25,int(remaining)),int(mode=='timing')))
 
 
+def console_command(command):
+    """Identical output packet for manual PowerShell and automatic X release."""
+    return bytearray((84,49,command))
+
+
 class GCVWorker:
     def __init__(self, width, height):
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -73,6 +78,8 @@ class GCVWorker:
         self.active_slot = None
         self.device_protocol = None
         self.device_gate = None
+        self.auto_release_event = 0
+        self.released_event = None
 
     def process(self, frame):
         import gtuner
@@ -116,15 +123,21 @@ class GCVWorker:
                 encode(packet, True)
                 if packet['session'] != self.session:
                     self.session = packet['session']
+                    self.released_event = None
+                    self.auto_release_event = 0
                     self.packet = {}
                 if packet['seq'] <= self.packet.get('seq',0):
                     continue
                 self.packet = packet
+                if packet.get('trigger',{}).get('event_id') == 0:
+                    self.released_event = None
+                    self.auto_release_event = 0
                 if not self.packet_seen:
                     self.packet_seen=True
                     print('NBA2K CV bridge: valid app telemetry received; sending acknowledgments.',flush=True)
                 self.last_packet = now
                 ack = dict(session=packet['session'],seq=packet['seq'],worker_protocol=3,device_protocol=self.device_protocol,
+                    output_path='console_release',auto_release_event=self.auto_release_event,
                     device_gate=self.device_gate,test_available=self.test_socket is not None,device_test_count=self.device_test_count,device_test_button=self.device_test_button,
                     hardware_counter=self.hardware_counter,active_slot=self.active_slot,device_sequence=self.device_sequence,device_event=self.device_event,
                     hardware_age_ms=(now-self.last_hardware)*1000 if self.last_hardware is not None else None)
@@ -153,13 +166,27 @@ class GCVWorker:
                               and button in ('A','X','HOLD_X')):
                             command={'A':1,'X':2,'HOLD_X':4}[button]
                 except (ValueError,UnicodeError):pass
+        payload=encode(self.packet, now-self.last_packet < STALE_SECONDS and
+                       0<=time.time()-self.packet.get('sent_at',0)<=STALE_SECONDS)
+        automatic=False
+        if len(payload)==26:
+            event=int.from_bytes(payload[11:15],'big')
+            key=(self.session,event)
+            if payload[4] and payload[5] and payload[25]==1 and event and key!=self.released_event:
+                # The same RELEASE_X operation as the proven PowerShell test.
+                # Prioritize a release over neutral/hold callbacks; never replay it.
+                command=3;automatic=True
+                self.released_event=key;self.auto_release_event=event
+            # Native green-trigger mechanics are no longer an output path.
+            # Rhythm output is deferred; telemetry and arming still flow normally.
+            payload[5]=0
         if command:
             self.last_test=now;self.test_reset=True
+            if automatic:print('AI RELEASE: event '+str(self.auto_release_event)+' -> tested RELEASE_X command; Xbox receipt unverified.',flush=True)
             print('CONSOLE TEST: forwarding one '+{1:'A tap',2:'X tap',3:'X release',4:'X hold',5:'AI-timed X hold'}[command]+' to Titan; Xbox receipt unverified.',flush=True)
-            return frame,bytearray((84,49,command))
-        if neutral:return frame,bytearray((84,49,0))
-        return frame, encode(self.packet, now-self.last_packet < STALE_SECONDS and
-                             0<=time.time()-self.packet.get('sent_at',0)<=STALE_SECONDS)
+            return frame,console_command(command)
+        if neutral:return frame,console_command(0)
+        return frame,payload
 
     def __del__(self):
         sock = getattr(self,'socket',None)

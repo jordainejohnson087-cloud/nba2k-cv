@@ -202,25 +202,41 @@ int main(){
         self.assertEqual(out[-1][0],0);self.assertEqual(out[-1][5],0)
         self.assertTrue(out[-1][10]&8192);self.assertFalse(out[-1][10]&4096)
 
-    def test_synthetic_meter_measurement_drives_ai_hold_release(self):
-        import time
+    def test_synthetic_meter_uses_tested_command_to_release_physical_and_ai_holds(self):
+        import sys,time
+        from types import SimpleNamespace
+        from unittest.mock import patch
         from meter_green import GreenGate,green_config,measure_green
         from run_video import estimate_fill
         from test_green import ColorTests,gcv
         fixture=ColorTests();fixture.setUp()
-        gate=GreenGate(green_config(dict(armed=True,shot_mode='timing',max_age_ms=250)))
-        frames=[{},dict(legacy=6),dict(legacy=3)]
-        for front in (70,55,33):
-            image=fixture.frame(front=front);fill=estimate_fill(image,fixture.box)
-            measurement=measure_green(image,fixture.box,fill,gate.config)
-            stamp=time.time();state=dict(status='detected',confidence=.9,shot_id=1,fill=fill)
-            state['trigger']=gate.update(state,measurement,stamp)
-            payload=gcv.encode(dict(state,sent_at=stamp,seq=1),True)
-            frames.append(dict(arm=payload[4],seen=payload[3],green=payload[5],
-                event=int.from_bytes(payload[11:15],'big'),lifetime=int.from_bytes(payload[23:25],'big')))
-        out=self.run_frames(frames)
-        self.assertEqual([r[0] for r in out],[0,100,100,100,100,0])
-        self.assertEqual(out[-1][5],1)
+        for physical in (False,True):
+            with self.subTest(physical=physical),patch.object(gcv,'PORT',0),patch.object(gcv,'TEST_PORT',0):
+                worker=gcv.GCVWorker(1,1)
+                gate=GreenGate(green_config(dict(armed=True,shot_mode='timing',max_age_ms=250)))
+                frames=[{},dict(x=100)] if physical else [{},dict(legacy=6),dict(legacy=3)]
+                try:
+                    with patch.dict(sys.modules,gtuner=SimpleNamespace(gpc_string=lambda:None)):
+                        for seq,front in enumerate((70,55,33),1):
+                            image=fixture.frame(front=front);fill=estimate_fill(image,fixture.box)
+                            measurement=measure_green(image,fixture.box,fill,gate.config)
+                            stamp=time.time();state=dict(status='detected',confidence=.9,shot_id=1,fill=fill)
+                            state['trigger']=gate.update(state,measurement,stamp)
+                            worker.packet=dict(state,sent_at=stamp,seq=seq);worker.last_packet=time.monotonic()
+                            payload=worker.process(None)[1]
+                            if len(payload)==3:
+                                self.assertEqual(payload,bytes((84,49,3)))
+                                frames.append(dict(x=100 if physical else 0,legacy=4))
+                            else:
+                                frames.append(dict(x=100 if physical else 0,arm=payload[4],seen=payload[3],green=payload[5],
+                                    event=int.from_bytes(payload[11:15],'big'),lifetime=int.from_bytes(payload[23:25],'big')))
+                    frames.extend([dict(x=100 if physical else 0,legacy=3),dict(x=100 if physical else 0)])
+                    out=self.run_frames(frames)
+                    self.assertTrue(all(row[0]==100 for row in out[1:-3]))
+                    self.assertTrue(all(row[0]==0 for row in out[-3:]))
+                    self.assertEqual(out[-1][5],0)  # Native green-action path was not used.
+                    self.assertEqual(out[-1][8],3)  # Actual GPC acknowledged tested RELEASE_X.
+                finally:worker.__del__()
 
     def test_rhythm_mode_is_rejected_and_right_stick_never_changes(self):
         out=self.run_frames([dict(mode=0,ry=100),dict(mode=0,x=100,ry=100,seen=1,green=1,event=1)])

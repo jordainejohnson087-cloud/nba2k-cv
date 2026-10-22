@@ -37,17 +37,19 @@ class GreenBridgeTests(unittest.TestCase):
 
     def check_mode(self,mode,callback_interval=.005,pulse=False):
         with patch.object(gcv,'PORT',0):worker=gcv.GCVWorker(1920,1080)
-        payloads=[];stopped=threading.Event();sequence=0;event=0;counter=0;errors=[]
-        def echo():return f'T2CV:{counter}:{sequence}:{event}:2:3'
+        payloads=[];stopped=threading.Event();sequence=0;event=0;counter=0;commands=0;button=0;errors=[]
+        def echo():return f'T2CV:{counter}:{sequence}:{event}:2:3:{commands}:{button}:272'
         def callbacks():
-            nonlocal sequence,event,counter
+            nonlocal sequence,event,counter,commands,button
             try:
                 while not stopped.is_set():
                     _,data=worker.process(None);counter+=1
                     if len(data)==26:
                         sequence=int.from_bytes(data[19:23],'big')
-                        if data[4] and data[5]:event=int.from_bytes(data[11:15],'big')
-                        payloads.append(data)
+                        self.assertEqual(data[5],0)
+                    elif data==bytes((84,49,3)):
+                        commands+=1;button=3
+                    payloads.append(data)
                     stopped.wait(callback_interval)
             except Exception as exc:errors.append(exc)
         with patch.dict(sys.modules,gtuner=SimpleNamespace(gpc_string=echo)):
@@ -72,15 +74,19 @@ class GreenBridgeTests(unittest.TestCase):
                         sdk.send(state,observed_at=captured)
                         if front==70:
                             self.assertFalse(measured['in_green'])
-                            self.assertFalse(any(p[5] for p in payloads))
+                            self.assertFalse(any(len(p)==3 and p[2]==3 for p in payloads))
                     self.assertEqual(candidates,1)
-                    self.assertTrue(wait_for(lambda:any(p[4] and p[5] for p in payloads)),errors)
-                    event_ids={int.from_bytes(p[11:15],'big') for p in payloads if p[4] and p[5]}
-                    self.assertEqual(event_ids,{1})
-                    self.assertTrue(all(p[25]==int(mode=='timing') for p in payloads if p[4] and p[5]))
-                    self.assertTrue(wait_for(lambda:service.status().get('device_event')==1))
+                    if mode=='timing':
+                        self.assertTrue(wait_for(lambda:commands==1),errors)
+                        self.assertTrue(wait_for(lambda:service.status().get('auto_release_event')==1))
+                        self.assertTrue(wait_for(lambda:service.status().get('device_test_button')==3))
+                        self.assertEqual(service.status().get('device_event'),0)
+                        self.assertEqual(service.status().get('output_path'),'console_release')
+                    else:
+                        self.assertTrue(wait_for(lambda:any(len(p)==26 and p[4] for p in payloads)))
+                        self.assertEqual(commands,0)
                     service.allow_output(False);service.clear()
-                    self.assertTrue(wait_for(lambda:payloads and payloads[-1][4]==0))
+                    self.assertTrue(wait_for(lambda:payloads and len(payloads[-1])==26 and payloads[-1][4]==0))
                 self.assertFalse(errors)
             finally:
                 if sdk:sdk.close()
