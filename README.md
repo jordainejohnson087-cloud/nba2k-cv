@@ -1,5 +1,9 @@
 # NBA 2K shot-meter CV pipeline
 
+## Release validation startup fix (2026102209)
+
+The first publication attempt stopped in two bridge-process tests: cold Windows PowerShell/Python startup had not completed within their 3–4 second assertions. Tests now wait, with a 20-second maximum and early-exit diagnostics, for the first successful bridge API status before running the original live echo and slot checks. The separate two-second bridge verification deadline, parent-lease shutdown check and release validation gate remain intact. This is a test harness correction; the app's arming fix and runtime behavior are unchanged.
+
 ## Controller-held X override arming (2026102209)
 
 The calibration checkbox previously changed a UI variable without applying detector settings or bridge output permission. It now invokes the same arming/disarming operation as the live controls immediately. Both views show a persistent X override status and the specific blocker (capture, stale detector, bridge stage, script capability, or settings write failure); transitions are logged. Unchecking disables output and clears pending events immediately.

@@ -7,7 +7,8 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 from bridge_service import (BridgeProcess, AsyncBridgeServiceClient, neutral_bridge_state,
                             unavailable_bridge)
 
@@ -20,6 +21,22 @@ def wait_for(check,seconds=4):
         if check():return True
         time.sleep(.01)
     return False
+
+
+def wait_for_host_start(host,seconds=20):
+    """Allow cold PowerShell/Python startup before timing the live bridge.
+
+    Config creation alone is insufficient: wait for the supervisor's first
+    successful API status. Never weaken the later USB echo/slot assertions.
+    """
+    end=time.monotonic()+seconds
+    while time.monotonic()<end:
+        status=host.status()
+        if status.get('api')=='running':return
+        if host.process.poll() is not None:break
+        time.sleep(.02)
+    raise AssertionError('Bridge startup failed: '+str(dict(
+        returncode=host.process.poll(),config_exists=host.config.exists(),stage=host.status().get('stage'))))
 
 
 class BridgeProcessTests(unittest.TestCase):
@@ -38,6 +55,7 @@ class BridgeProcessTests(unittest.TestCase):
         receiver_thread=threading.Thread(target=receiver,daemon=True);receiver_thread.start()
         host=BridgeProcess(sys.executable,RUNTIME,udp.getsockname()[1])
         try:
+            wait_for_host_start(host)
             host.configure(enabled=True,expected_slot=2)
             self.assertTrue(host.verify(timeout=2,expected_slot=2)['ready'])
             self.assertTrue(all(not p['trigger']['armed'] for p in packets))
@@ -71,7 +89,7 @@ class BridgeProcessTests(unittest.TestCase):
     def test_host_exits_after_parent_lease_is_lost(self):
         host=BridgeProcess(sys.executable,RUNTIME)
         try:
-            self.assertTrue(wait_for(host.config.exists))
+            wait_for_host_start(host)
             # Simulate a supervisor crash: stop its threads without terminating child.
             host.stopped.set();host.thread.join(1);host.heartbeat.join(1)
             host.lease.unlink(missing_ok=True)
@@ -79,6 +97,18 @@ class BridgeProcessTests(unittest.TestCase):
             self.assertEqual(host.process.returncode,0)
         finally:
             host.stopped.clear();host.close()
+
+    def test_startup_wait_requires_api_and_reports_early_child_exit(self):
+        host=SimpleNamespace(status=Mock(),
+            process=Mock(),config=Mock())
+        host.process.poll.return_value=None;host.config.exists.return_value=True
+        host.status.side_effect=[unavailable_bridge('starting'),dict(api='running')]
+        with patch('test_bridge_process.time.sleep'):wait_for_host_start(host)
+        self.assertEqual(host.status.call_count,2)
+        host.status.side_effect=None;host.status.return_value=unavailable_bridge('exited')
+        host.process.poll.return_value=1
+        with self.assertRaisesRegex(AssertionError,'returncode.*1'):
+            wait_for_host_start(host)
 
     def test_engine_reloads_restarted_host_configuration(self):
         seen=[]
