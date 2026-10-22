@@ -63,6 +63,15 @@ class SessionTests(unittest.TestCase):
             self.assertFalse(ui.trigger_armed.get());ui.bridge_service.allow_output.assert_called_with(False)
             self.assertIn('could not be applied',ui.status.get())
 
+    def test_detector_snapshot_lock_uses_only_recent_same_run_cache(self):
+        with tempfile.TemporaryDirectory() as folder:
+            out=Path(folder);ui=self.ui(out)
+            self.assertIsNotNone(ui._detector_status())
+            with patch.object(Path,'read_text',side_effect=PermissionError('locked')):
+                self.assertIsNotNone(ui._detector_status())
+                with patch('app.time.time',return_value=time.time()+1):self.assertIsNone(ui._detector_status())
+                ui.active_out=out/'new_run';self.assertIsNone(ui._detector_status())
+
     def test_startup_timeout_and_cancel_do_not_restart_engine(self):
         with tempfile.TemporaryDirectory() as folder:
             ui=self.ui(Path(folder));ui.session_deadline=0;ui._session_tick()

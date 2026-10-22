@@ -496,7 +496,7 @@ class Desktop(tk.Tk):
         ttk.Separator(device_card).pack(fill='x',pady=8)
         ttk.Button(device_card,text='Arm Meter Shots',style='Accent.TButton',command=self._arm_shots).pack(fill='x',pady=4)
         ttk.Button(device_card,text='Disarm Shots',command=self._disarm_shots).pack(fill='x',pady=4)
-        ttk.Label(device_card,text='Hold Xbox X to begin the shot. A fresh green-meter event commands the selected right-stick flick. R3 cancels.',
+        ttk.Label(device_card,text='Hold Xbox X to begin the shot. A fresh green-meter event commands the selected right-stick flick. Disarm Shots stops automatic output.',
             style='CardMuted.TLabel',wraplength=235).pack(anchor='w',pady=6)
         ttk.Label(device_card,textvariable=self.green_status,style='CardMuted.TLabel',wraplength=235).pack(anchor='w',pady=6)
         ttk.Label(device_card,text='Direction').pack(anchor='w')
@@ -917,11 +917,16 @@ class Desktop(tk.Tk):
 
     def _detector_status(self):
         if not self.live_active or not self.active_out:return None
+        value=None
         try:
             value=json.loads((self.active_out/'live_status.json').read_text(encoding='utf-8'))
-            if not 0<=time.time()-value['timestamp']<=.5:return None
-            return value
-        except (OSError,ValueError,KeyError,TypeError):return None
+            if 0<=time.time()-value['timestamp']<=.5:
+                self.detector_status_cache=(self.active_out,value)
+                return value
+        except (OSError,ValueError,KeyError,TypeError):pass
+        cached=getattr(self,'detector_status_cache',None)
+        if cached and cached[0]==self.active_out and 0<=time.time()-cached[1]['timestamp']<=.5:return cached[1]
+        return None
 
     def _arming_blocker(self):
         if self.preparing_bridge:return 'Wait for bridge preparation before arming.'
@@ -933,7 +938,7 @@ class Desktop(tk.Tk):
 
     def _arm_shots(self):
         self.trigger_armed.set(True);self._apply_green()
-        if self.trigger_armed.get():self.session_status.set('ARMED — hold X; observed green controls the flick. R3 cancels.')
+        if self.trigger_armed.get():self.session_status.set('ARMED — hold X; observed green controls the flick. Disarm Shots stops output.')
 
     def _disarm_shots(self):
         self.trigger_armed.set(False)
