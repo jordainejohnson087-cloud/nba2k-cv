@@ -134,6 +134,7 @@ def main():
                 app.capture_active=False;app.capture_process=None
                 # One front-end coordinates the existing separate workers; arming is explicit.
                 app.live_active=False;app.process=None;app.preparing_bridge=False
+                app.model.set(str(model));app.environment.set(sys.executable);app.bridge_enabled.set(True)
                 def start_engine():app.live_active=True
                 with patch.object(app,'_save'),patch.object(app,'_busy',return_value=False),\
                      patch.object(app,'_connect_bridge') as connect,patch.object(app,'_start_capture') as capture,\
