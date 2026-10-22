@@ -35,7 +35,21 @@ using int8=int8_t; using int16=int16_t;
 #define PS4_R3 6
 int actual[32], output[32], delta; bool fresh=true; uint8 bytes[26];
 int elapsed_time(){return delta;}
-int get_actual(int id){return actual[id];}
+// GPC2 disallows implicit int/fix32 comparisons; C++ normally permits them.
+struct fix32 {
+ double value;
+ explicit fix32(double v):value(v){}
+ explicit operator bool() const{return value!=0.0;}
+};
+bool operator>=(fix32 a,double b){return a.value>=b;}
+bool operator<=(fix32 a,double b){return a.value<=b;}
+bool operator>(fix32 a,double b){return a.value>b;}
+bool operator<(fix32 a,double b){return a.value<b;}
+bool operator>=(fix32,int)=delete;
+bool operator<=(fix32,int)=delete;
+bool operator>(fix32,int)=delete;
+bool operator<(fix32,int)=delete;
+fix32 get_actual(int id){return fix32(actual[id]);}
 void set_val(int id,int value){output[id]=value;}
 bool gcv_ready(){return fresh;}
 void gcv_read(uint8 offset,uint8* value){*value=bytes[offset];}
@@ -60,10 +74,21 @@ int main(){
  }
 }
 '''
-        cpp=root/'mechanics.cpp';cpp.write_text(prelude+source+harness)
+        cls.cpp_source=prelude+source+harness
+        cls.compiler=compiler
+        cpp=root/'mechanics.cpp';cpp.write_text(cls.cpp_source)
         cls.binary=root/'mechanics'
         result=subprocess.run([compiler,'-std=c++11',str(cpp),'-o',str(cls.binary)],capture_output=True,text=True,timeout=30)
         if result.returncode:raise AssertionError(result.stderr)
+
+    def test_host_shim_rejects_the_original_integer_threshold_error(self):
+        root=Path(self.folder.name)
+        broken=root/'integer_threshold.cpp'
+        broken.write_text(self.cpp_source.replace('>= 50.0','>= 50'))
+        result=subprocess.run([self.compiler,'-std=c++11',str(broken),'-o',str(root/'broken')],
+            capture_output=True,text=True,timeout=30)
+        self.assertNotEqual(result.returncode,0)
+        self.assertIn('deleted',result.stderr)
 
     def run_frames(self,frames,mode=0):
         rows=[]
@@ -107,6 +132,14 @@ int main(){
         out=self.run_frames([dict(direction=1),dict(direction=1,ry=-100,seen=1)]+
             [dict(direction=1,ry=-100,seen=1,green=1,event=1) for _ in range(12)])
         self.assertTrue(any(r[1]==100 for r in out))
+
+    def test_stick_neutral_and_hold_threshold_boundaries(self):
+        out=self.run_frames([dict(ry=20),dict(ry=19),dict(ry=49,seen=1),
+            dict(ry=50,seen=1,green=1,event=1),dict(ry=50,seen=1,event=1),
+            dict(ry=50,seen=1,green=1,event=2)])
+        self.assertTrue(out[0][6]);self.assertFalse(out[1][6])
+        self.assertEqual(out[3][5],0)
+        self.assertEqual(out[-1][5],2)
 
     def test_cancel_stale_and_disarm_stop_pending_flick_and_require_release(self):
         for cancel in (dict(r3=100),dict(arm=0),dict(deliver=0,dt=150)):

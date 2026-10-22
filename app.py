@@ -883,7 +883,7 @@ class Desktop(tk.Tk):
                     else:
                         result=current
                     if not result['ready'] and not read_only:
-                        error=result['stage']+'. Connect Titan PROG to this PC, compile and install the updated bridge 3.0 titan_meter.gpc in the selected slot, and start bridge/gtuner_meter.py in Gtuner Computer Vision with Null Video Input. Keep that worker running; opening the files alone does not start it. Console OUTPUT/authentication is separate.'
+                        error=result['stage']+'. Connect Titan PROG to this PC, compile and install the updated bridge 3.1 titan_meter.gpc in the selected slot, and start bridge/gtuner_meter.py in Gtuner Computer Vision with Null Video Input. Keep that worker running; opening the files alone does not start it. Console OUTPUT/authentication is separate.'
                 if found and result is not None:result=dict(result,gtuner_path=str(found))
             except Exception as exc:
                 error=str(exc);result=service.status()

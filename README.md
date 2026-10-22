@@ -1,5 +1,9 @@
 # NBA 2K shot-meter CV pipeline
 
+## GPC2 numeric-type fix (2026102202)
+
+Bridge **3.1** fixes the vendor compilation errors on direct `get_actual()` comparisons: that API returns `fix32`, so RS/X thresholds now use decimal literals (`50.0`, `-50.0`, `0.0`, `-20.0`, `20.0`). Shooting mechanics and wire protocol v3 are unchanged. Export the matching scripts from the updated app and compile/install `titan_meter.gpc` again. The original host shim returned integers and missed this restriction; it now returns a distinct fixed-point stand-in that rejects comparisons with integer literals. Host/Windows tests still do not replace compilation in Gtuner or console validation.
+
 ## Rhythm and Timing shot modes (2026102201)
 
 The Live Detection sidebar now selects **rhythm** or **timing**. Changing mode disarms output; release X and RS, then explicitly arm again. This replaces the earlier X-to-RS conversion described in older release notes below.

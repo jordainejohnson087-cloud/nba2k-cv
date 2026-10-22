@@ -129,7 +129,7 @@ class BridgeService:
         compatible=value.get('worker_protocol')==3 and value.get('device_protocol')==3
         ready=compatible and value['hardware']=='heartbeat verified' and echo and slot_valid and matching
         if value['receiver']!='receiving':stage='Gtuner CV worker not receiving'
-        elif not compatible:stage='Bridge version mismatch; restart the updated GCV worker and install Titan bridge 3.0'
+        elif not compatible:stage='Bridge version mismatch; restart the updated GCV worker and install Titan bridge 3.1'
         elif value['hardware']!='heartbeat verified' or not echo:stage='Titan script payload echo missing'
         elif not slot_valid:stage='Titan slot echo missing; install the current meter GPC'
         elif not matching:stage='Selected Titan slot does not match'

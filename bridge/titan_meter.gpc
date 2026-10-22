@@ -1,4 +1,4 @@
-#pragma METAINFO("NBA2K CV Meter Bridge", 3, 0, "NBA2K CV")
+#pragma METAINFO("NBA2K CV Meter Bridge", 3, 1, "NBA2K CV")
 #include <PS4.gph>
 // App v3 only: Rhythm = physical RS hold then flick; Timing = X hold/release.
 // RT, movement and unrelated buttons are never rewritten.
@@ -56,10 +56,11 @@ main {
             }
         } else { armed = FALSE; }
     }
+    // get_actual returns fix32: compare it with decimal (fix32) thresholds.
     // A direction uses the opposite physical hold to begin the rhythm shot.
-    holding = (flick_value < 0 && get_actual(PS4_RY) >= 50)
-           || (flick_value > 0 && get_actual(PS4_RY) <= -50);
-    if(shot_mode == 1) holding = get_actual(BUTTON_17) > 0;
+    holding = (flick_value < 0 && get_actual(PS4_RY) >= 50.0)
+           || (flick_value > 0 && get_actual(PS4_RY) <= -50.0);
+    if(shot_mode == 1) holding = get_actual(BUTTON_17) > 0.0;
 
     // R3 cancels automation without remapping it to X or touching other inputs.
     // After disarm, timeout, cancellation or mode change, require a release.
@@ -73,7 +74,7 @@ main {
         phase = 0;
         shot_active = FALSE;
         last_event = event_id;
-        if(!get_actual(BUTTON_17) && get_actual(PS4_RY) > -20 && get_actual(PS4_RY) < 20) {
+        if(!get_actual(BUTTON_17) && get_actual(PS4_RY) > -20.0 && get_actual(PS4_RY) < 20.0) {
             blocked = FALSE;
             fired = FALSE;
         }
@@ -124,7 +125,7 @@ main {
             else if(phase == 1) set_val(PS4_RY, -active_value);
             else if(phase == 3) {
                 set_val(PS4_RY, 0);
-                if(get_actual(PS4_RY) > -20 && get_actual(PS4_RY) < 20) {
+                if(get_actual(PS4_RY) > -20.0 && get_actual(PS4_RY) < 20.0) {
                     phase = 0;
                     shot_active = FALSE;
                     fired = FALSE;
