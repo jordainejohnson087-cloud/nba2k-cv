@@ -162,7 +162,7 @@ class BridgeService:
         compatible=value.get('worker_protocol')==3 and value.get('device_protocol')==3
         ready=compatible and value['hardware']=='heartbeat verified' and echo and slot_valid and matching
         if value['receiver']!='receiving':stage='Gtuner CV worker not receiving'
-        elif not compatible:stage='Bridge version mismatch; restart the updated GCV worker and install Titan bridge 3.1'
+        elif not compatible:stage='Bridge version mismatch; run the matching gtuner_meter.py and titan_meter.gpc exported by this app'
         elif value['hardware']!='heartbeat verified' or not echo:stage='Titan script payload echo missing'
         elif not slot_valid:stage='Titan slot echo missing; install the current meter GPC'
         elif not matching:stage='Selected Titan slot does not match'
@@ -290,6 +290,7 @@ def run_bridge_host(config,lease,port=26740):
     service=BridgeService(port)
     try:
         service.write_config(config)
+        print('Python console backend ready; local API active. Xbox output remains unverified.',flush=True)
         while True:
             try:
                 if time.time()-Path(lease).stat().st_mtime>3:break
@@ -319,23 +320,28 @@ class BridgeProcess:
         encoded=base64.b64encode(command.encode('utf-16-le')).decode('ascii')
         return [shell,'-NoProfile','-NonInteractive','-EncodedCommand',encoded]
 
-    def __init__(self,executable,runtime,port=26740):
+    def __init__(self,executable,runtime,port=26740,log_dir=None):
         self.folder=Path(tempfile.mkdtemp(prefix='nba2k-bridge-'))
         self.config=self.folder/'api.json';self.lease=self.folder/'owner.lease';self.lease.touch()
         self.commands=queue.Queue();self.stopped=threading.Event();self.lock=threading.Lock()
         self.cached=unavailable_bridge('Bridge process starting');self.updated=0
         self.process=None;self.thread=None;self.heartbeat=None
+        self.log_stream=None;self.log_offset=0
+        self.log_path=(Path(log_dir)/self.folder.name/"backend.log") if log_dir else self.folder/"backend.log"
         try:
-            arguments=[str(runtime),'--bridge-host',str(self.config),
+            self.log_path.parent.mkdir(parents=True,exist_ok=True)
+            self.log_stream=self.log_path.open('ab',buffering=0)
+            arguments=['-u',str(runtime),'--bridge-host',str(self.config),
                 '--bridge-lease',str(self.lease),'--bridge-port',str(port)]
             self.transport='PowerShell → Python' if os.name=='nt' else 'Python'
             command=self.powershell_command(executable,arguments) if os.name=='nt' else [str(executable),*arguments]
             self.process=subprocess.Popen(command,
-                stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
+                stdout=self.log_stream,stderr=subprocess.STDOUT,
                 creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0) if os.name=='nt' else 0)
             self.heartbeat=threading.Thread(target=self._heartbeat,daemon=True);self.heartbeat.start()
             self.thread=threading.Thread(target=self._control,daemon=True);self.thread.start()
         except Exception:
+            if self.log_stream:self.log_stream.close()
             shutil.rmtree(self.folder,ignore_errors=True);raise
 
     def _rpc(self,path,body=None,timeout=.4):
@@ -386,9 +392,20 @@ class BridgeProcess:
 
     def status(self):
         with self.lock:
-            if self.process.poll() is not None:return unavailable_bridge('Bridge process exited; reconnect to restart it')
-            if time.monotonic()-self.updated>.5:return unavailable_bridge('Bridge process starting or status stale')
-            return dict(self.cached)
+            code=self.process.poll()
+            if code is not None:value=unavailable_bridge('Python console backend exited (code '+str(code)+'); see backend log and reconnect')
+            elif time.monotonic()-self.updated>.5:value=unavailable_bridge('Python console backend starting or status stale')
+            else:value=dict(self.cached)
+            return dict(value,backend_transport=self.transport,backend_pid=self.process.pid,
+                        backend_exit_code=code,backend_log=str(self.log_path))
+
+    def read_output(self):
+        """Bounded file reads: a verbose/crashed child cannot block the UI."""
+        try:
+            with self.log_path.open('rb') as source:
+                source.seek(self.log_offset);data=source.read(8192);self.log_offset=source.tell()
+            return data.decode('utf-8',errors='replace')
+        except OSError:return ''
 
     def _enqueue(self,path,body):
         if self.stopped.is_set():return
@@ -436,6 +453,7 @@ class BridgeProcess:
                 self.process.terminate()
                 try:self.process.wait(timeout=1)
                 except subprocess.TimeoutExpired:self.process.kill();self.process.wait(timeout=1)
+        if self.log_stream:self.log_stream.close()
         shutil.rmtree(self.folder,ignore_errors=True)
 
 

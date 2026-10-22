@@ -45,8 +45,14 @@ if errorlevel 1 (
 )
 ".venv311\Scripts\python.exe" -c "import cv2, torch, ultralytics, PIL, win32api, pywintypes, pythoncom, pywinauto, psutil; print('OpenCV and PyWin32 ready')"
 if errorlevel 1 goto setup_failed
-start "" ".venv311\Scripts\pythonw.exe" "app.py"
+echo Starting NBA2K CV: PowerShell - Python 3.11 backend
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -Command "& '.\.venv311\Scripts\python.exe' -u '.\app.py'; exit $LASTEXITCODE"
+if errorlevel 1 goto app_failed
 exit /b 0
+:app_failed
+echo App exited with an error. Review the output above and test_results\backend logs.
+pause
+exit /b 1
 :python_missing
 echo Python 3.11 x64 is required. Install it from https://www.python.org/downloads/release/python-3119/
 :setup_failed

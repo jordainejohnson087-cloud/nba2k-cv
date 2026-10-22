@@ -293,7 +293,7 @@ class Desktop(tk.Tk):
         self.update_notice=None
         self._build()
         try:
-            self.bridge_service=BridgeProcess(sys.executable,PROJECT/'run_live.py')
+            self.bridge_service=BridgeProcess(sys.executable,PROJECT/'run_live.py',log_dir=PROJECT/'test_results'/'backend')
             self.bridge_service.configure(enabled=self.bridge_enabled.get())
         except OSError as exc:self.bridge_setup_status.set('Local bridge service unavailable: '+str(exc))
         self.after(100,self._poll)
@@ -786,7 +786,7 @@ class Desktop(tk.Tk):
         service=getattr(self,'bridge_service',None)
         if service is None or (hasattr(service,'process') and service.process.poll() is not None):
             if service:service.close()
-            try:self.bridge_service=BridgeProcess(sys.executable,PROJECT/'run_live.py')
+            try:self.bridge_service=BridgeProcess(sys.executable,PROJECT/'run_live.py',log_dir=PROJECT/'test_results'/'backend')
             except OSError as exc:
                 self.bridge_setup_status.set('Bridge restart failed: '+str(exc));return
         inventory=getattr(self,'hardware_inventory',{})
@@ -1115,7 +1115,7 @@ class Desktop(tk.Tk):
         if bridge.get('output_path')!='console_release':
             return 'Restart the updated gtuner_meter CV worker to use the tested console X-release path.'
         if type(bridge.get('device_gate')) is not int or not (bridge['device_gate'] & 256):
-            return 'Install the exported X-only Titan meter bridge 3.4, then restart the updated gtuner_meter worker.'
+            return 'Install this app’s exported titan_meter.gpc, then restart its matching gtuner_meter worker.'
         return None
 
     def _arm_shots(self):
@@ -1728,6 +1728,14 @@ class Desktop(tk.Tk):
     def _bridge_tick(self):
         if self.bridge_service is None or time.monotonic()-self.bridge_tick_at<.5:return
         self.bridge_tick_at=time.monotonic();value=self.bridge_service.status()
+        reader=getattr(self.bridge_service,'read_output',None)
+        if callable(reader):
+            output=reader()
+            if isinstance(output,str) and output:self._log('[Python backend] '+output)
+        backend_stage=(value.get('backend_pid'),value.get('backend_exit_code'),value.get('api'))
+        if backend_stage!=getattr(self,'last_backend_stage',None):
+            self.last_backend_stage=backend_stage
+            if value.get('backend_log'):self._log('Backend: '+str(value.get('backend_transport'))+' | '+str(value.get('stage'))+' | Log: '+value['backend_log']+'\n')
         if (self.live_active and self.active_out and hasattr(self.bridge_service,'config')
                 and self.bridge_service.config.exists() and getattr(self,'bridge_config_host',None)!=id(self.bridge_service)):
             try:

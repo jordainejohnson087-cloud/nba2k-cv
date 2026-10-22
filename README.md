@@ -1,5 +1,14 @@
 # NBA 2K shot-meter CV pipeline
 
+## PowerShell launcher and observable Python backend (2026102211)
+
+The normal launcher now runs the full app through PowerShell using `.venv311\Scripts\python.exe -u`, retaining the terminal and exit errors instead of detaching pythonw. Python 3.11 remains the application/runtime backend. The app owns separate capture, CUDA detection and persistent console-host processes; PowerShell starts the console host and manual test commands. Capture and inference remain direct Python children so existing stop/cleanup behavior is preserved. No shell process is spawned on a green event.
+
+Console-backend stdout/stderr is retained under `test_results/backend/<session>/backend.log` and forwarded into the app Output panel using bounded reads. Backend status includes process ID, exit code and log location. Transport status is separate from verified Xbox behavior. Reconnection creates a new log; closing the app removes transient credentials but retains diagnostics. The obsolete “install bridge 3.1” error now requests the app’s matching exported Python/GPC pair.
+
+This changes startup and diagnostics, not the USB route: the tested release still travels through Gtuner and Titan to Xbox. Automatic AI output remains subject to physical-console validation.
+
+
 ## AI uses the tested console release command (2026102210)
 
 Automatic Timing green events now emit exactly the same three-byte RELEASE_X command as the working manual PowerShell test. The persistent Gtuner worker sends it once per fresh eligible event; no new PowerShell process is started at the green frame. Titan still forwards controller output to Xbox. The separate native green-trigger output is disabled by the worker; rhythm remains deferred.

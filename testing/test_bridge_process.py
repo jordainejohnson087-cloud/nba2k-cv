@@ -86,6 +86,26 @@ class BridgeProcessTests(unittest.TestCase):
             host.close();stopped.set();receiver_thread.join(1);udp.close()
         self.assertFalse(host.folder.exists())
 
+    def test_backend_crash_logs_are_visible_and_survive_cleanup(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);runtime=root/'broken backend.py'
+            runtime.write_text("print('backend diagnostic',flush=True)\nraise RuntimeError('startup failed')\n")
+            host=BridgeProcess(sys.executable,runtime,log_dir=root/'logs')
+            try:
+                host.process.wait(timeout=20)
+                status=host.status()
+                self.assertFalse(status['ready'])
+                self.assertNotEqual(status['backend_exit_code'],0)
+                self.assertEqual(status['backend_pid'],host.process.pid)
+                output=host.read_output()
+                self.assertIn('backend diagnostic',output)
+                self.assertIn('startup failed',output)
+                self.assertEqual(host.read_output(),'')
+                path=Path(status['backend_log'])
+            finally:host.close()
+            self.assertTrue(path.is_file())
+            self.assertFalse(host.folder.exists())
+
     def test_host_exits_after_parent_lease_is_lost(self):
         host=BridgeProcess(sys.executable,RUNTIME)
         try:
