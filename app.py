@@ -438,7 +438,9 @@ class Desktop(tk.Tk):
         ttk.Combobox(runtime,textvariable=self.compute,values=('auto','0','cpu'),state='readonly').pack(fill='x',pady=5)
         ttk.Label(runtime,text='Controller profile',style='CardMuted.TLabel').pack(anchor='w',pady=(6,0))
         ttk.Combobox(runtime,textvariable=self.controller,values=('Xbox / GameSir','Xbox Elite','DualSense','DualShock 4','Generic HID'),state='readonly').pack(fill='x',pady=5)
-        ttk.Checkbutton(runtime,text='Enable Titan Two bridge',variable=self.bridge_enabled).pack(anchor='w',pady=5)
+        self.bridge_toggle=ttk.Checkbutton(runtime,text='Enable Titan Two bridge',variable=self.bridge_enabled,
+            command=lambda:self._connect_bridge() if self.bridge_enabled.get() else self._disconnect_bridge())
+        self.bridge_toggle.pack(anchor='w',pady=5)
         ttk.Button(runtime,text='Open bridge settings',command=lambda:self.tabs.select(self.bridge_tab)).pack(anchor='w')
         work=ttk.Frame(live);work.grid(row=0,column=1,sticky='nsew')
         work.columnconfigure(0,weight=1);work.rowconfigure(2,weight=1)

@@ -48,6 +48,10 @@ def main():
             if not required.issubset(names):
                 raise AssertionError(f'Missing app tabs: {required - set(names)}')
             assert app.live_slots.winfo_exists() and len(app.live_slots.get_children())==9
+            app.bridge_enabled.set(False)
+            with patch.object(app,'_connect_bridge') as connect,patch.object(app,'_disconnect_bridge') as disconnect:
+                app.bridge_toggle.invoke();connect.assert_called_once()
+                app.bridge_toggle.invoke();disconnect.assert_called_once()
             # Output is resizable and detachable; video has one movable presentation target.
             assert len(app.live_panes.panes())==2
             app.live_panes.sashpos(0,250);app.update()
