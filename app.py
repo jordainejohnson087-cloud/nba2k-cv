@@ -272,7 +272,7 @@ class Desktop(tk.Tk):
         self.bridge_next_step=tk.StringVar(value='Use Gtuner as the Titan host. Disconnect the Helios bridge before testing this backend.')
         self.component_status=tk.StringVar(value='Capture: stopped\nEngine: stopped\nModel: selectable weight\nBridge: starting independently')
         self.live_metrics=tk.StringVar(value='Preview idle')
-        try:green=green_config(saved.get('green',{}))
+        try:green=green_config(dict(saved.get('green',{}),shot_mode='timing'))
         except ValueError:green=green_config()
         self.trigger_armed=tk.BooleanVar(value=False)
         self.green_vars={key:tk.StringVar(value=str(value)) for key,value in green.items() if key!='armed'}
@@ -498,15 +498,13 @@ class Desktop(tk.Tk):
         ttk.Separator(device_card).pack(fill='x',pady=8)
         ttk.Button(device_card,text='Arm Meter Shots',style='Accent.TButton',command=self._arm_shots).pack(fill='x',pady=4)
         ttk.Button(device_card,text='Disarm Shots',command=self._disarm_shots).pack(fill='x',pady=4)
-        ttk.Label(device_card,text='Rhythm: hold RS opposite the flick direction; observed green starts the flick. Timing: hold X; observed green releases X. RT and movement pass through.',
+        ttk.Label(device_card,text='X JUMPSHOTS: hold X through green. The AI releases X output; physically release X afterward. RT, movement and RS pass through.',
             style='CardMuted.TLabel',wraplength=235).pack(anchor='w',pady=6)
         ttk.Label(device_card,textvariable=self.green_status,style='CardMuted.TLabel',wraplength=235).pack(anchor='w',pady=6)
-        ttk.Label(device_card,text='Shot mode').pack(anchor='w')
-        self.shot_mode_menu=mode_menu=ttk.Combobox(device_card,textvariable=self.green_vars['shot_mode'],values=('rhythm','timing'),state='readonly')
+        ttk.Label(device_card,text='X jumpshot control').pack(anchor='w')
+        self.shot_mode_menu=mode_menu=ttk.Combobox(device_card,textvariable=self.green_vars['shot_mode'],values=('timing',),state='readonly')
         mode_menu.pack(fill='x',pady=4)
         mode_menu.bind('<<ComboboxSelected>>',lambda event:self._shot_mode_changed())
-        ttk.Label(device_card,text='Rhythm flick direction').pack(anchor='w')
-        ttk.Combobox(device_card,textvariable=self.green_vars['direction'],values=('up','down'),state='readonly').pack(fill='x',pady=4)
         ttk.Button(device_card,text='Apply Shot Settings',command=self._apply_green).pack(fill='x',pady=4)
         ttk.Label(device_card,textvariable=self.bridge_status,style='CardMuted.TLabel',wraplength=235).pack(anchor='w',pady=8)
         ttk.Label(device_card,textvariable=self.bridge_next_step,style='CardMuted.TLabel',wraplength=235).pack(anchor='w',pady=8)
@@ -514,6 +512,7 @@ class Desktop(tk.Tk):
         ttk.Label(test_card,text='PowerShell sends one A/X tap using the manual test path. No meter or model is needed. Use a menu or practice session.',style='CardMuted.TLabel',wraplength=235).pack(anchor='w')
         ttk.Button(test_card,text='Open original working test pair',command=self._open_original_test).pack(fill='x',pady=4)
         ttk.Button(test_card,text='Test A via PowerShell',command=lambda:self._console_tap('A')).pack(fill='x',pady=4)
+        ttk.Button(test_card,text='Release Held X — test',command=lambda:self._console_tap('RELEASE_X')).pack(fill='x',pady=4)
         ttk.Button(test_card,text='Test X via PowerShell',command=lambda:self._console_tap('X')).pack(fill='x',pady=4)
         self.console_test_status=tk.StringVar(value='No console test requested')
         ttk.Label(test_card,textvariable=self.console_test_status,style='CardMuted.TLabel',wraplength=235).pack(anchor='w',pady=4)
@@ -618,18 +617,14 @@ class Desktop(tk.Tk):
         calibration.pack(fill='x',pady=8)
         fields=[('Hue low','hue_low'),('Hue high','hue_high'),('Saturation min','saturation_min'),
             ('Brightness min','value_min'),('Green row fraction','row_coverage'),('Confidence min','min_confidence'),
-            ('Confirm frames','confirmations'),('Maximum age ms','max_age_ms'),('Rearm absence ms','rearm_ms'),
-            ('Flick delay ms','delay_ms'),('Flick hold ms','hold_ms')]
+            ('Confirm frames','confirmations'),('Maximum age ms','max_age_ms'),('Rearm absence ms','rearm_ms')]
         for index,(title,key) in enumerate(fields):
             row,column=divmod(index,3)
             ttk.Label(calibration,text=title).grid(row=row,column=column*2,sticky='w',padx=4,pady=3)
             ttk.Entry(calibration,textvariable=self.green_vars[key],width=9).grid(row=row,column=column*2+1,padx=4)
-        ttk.Label(calibration,text='Rhythm flick direction').grid(row=4,column=0,sticky='w',padx=4)
-        ttk.Combobox(calibration,textvariable=self.green_vars['direction'],values=('up','down'),
-            state='readonly',width=9).grid(row=4,column=1)
-        ttk.Checkbutton(calibration,text='Enable calibrated green trigger (Rhythm: RS; Timing: X)',
+        ttk.Checkbutton(calibration,text='Enable X-release trigger',
             variable=self.trigger_armed).grid(row=5,column=0,columnspan=6,sticky='w',pady=6)
-        ttk.Button(calibration,text='Apply Detection / Flick Settings',command=self._apply_green).grid(row=6,column=0,columnspan=6,sticky='w')
+        ttk.Button(calibration,text='Apply X Shot Settings',command=self._apply_green).grid(row=6,column=0,columnspan=6,sticky='w')
         ttk.Label(calibration,textvariable=self.green_status,wraplength=950).grid(row=7,column=0,columnspan=6,sticky='w',pady=4)
         results=ttk.Frame(self.tabs,padding=14);self.tabs.add(results,text='Results')
         ttk.Button(results,text='Refresh Runs',command=self._refresh).pack(anchor='w')
@@ -898,7 +893,7 @@ class Desktop(tk.Tk):
                     else:
                         result=current
                     if not result['ready'] and not read_only:
-                        error=result['stage']+'. Connect Titan PROG to this PC, compile and install the updated bridge 3.3 titan_meter.gpc in the selected slot, and start bridge/gtuner_meter.py in Gtuner Computer Vision with Null Video Input. Keep that worker running; opening the files alone does not start it. Console OUTPUT/authentication is separate.'
+                        error=result['stage']+'. Connect Titan PROG to this PC, compile and install the updated X-only bridge 3.4 titan_meter.gpc in the selected slot, and start bridge/gtuner_meter.py in Gtuner Computer Vision with Null Video Input. Keep that worker running; opening the files alone does not start it. Console OUTPUT/authentication is separate.'
                 if found and result is not None:result=dict(result,gtuner_path=str(found))
             except Exception as exc:
                 error=str(exc);result=service.status()
@@ -924,13 +919,15 @@ class Desktop(tk.Tk):
         except (OSError,ValueError) as exc:self.console_test_status.set(str(exc))
 
     def _console_tap(self,button):
-        if button not in ('A','X') or getattr(self,'console_test_busy',False):return
+        if button not in ('A','X','RELEASE_X') or getattr(self,'console_test_busy',False):return
         if sys.platform!='win32':
             self.console_test_status.set('PowerShell console tests require Windows.');return
         if time.monotonic()-getattr(self,'console_test_at',-10)<1:
             self.console_test_status.set('Wait one second between console tests.');return
         service=self.bridge_service
         status=service.status() if service else {}
+        if button=='RELEASE_X' and (not status.get('ready') or type(status.get('device_gate')) is not int or not (status['device_gate'] & 256)):
+            self.console_test_status.set('Connect the X-only bridge 3.4 and gtuner_meter. Hold X, then press Release Held X.');return
         # Diagnostic sending must work with the original standalone receiver,
         # which has no app API, version handshake, heartbeat or execution counter.
         self._disarm_shots()
@@ -960,9 +957,10 @@ class Desktop(tk.Tk):
                 while service is not None and type(baseline) is int and time.monotonic()<deadline:
                     current=service.status()
                     if (current.get('ready') and type(current.get('device_test_count')) is int
-                        and current['device_test_count']!=baseline and current.get('device_test_button')=={'A':1,'X':2}[button]):
-                        result='Titan reports issuing '+button+' (100 ms). Check the Xbox screen; Xbox receipt is unverified.';break
+                        and current['device_test_count']!=baseline and current.get('device_test_button')=={'A':1,'X':2,'RELEASE_X':3}[button]):
+                        result=('Titan reports releasing held X until physical release.' if button=='RELEASE_X' else 'Titan reports issuing '+button+' (100 ms).')+' Check the Xbox screen; Xbox receipt is unverified.';break
                     time.sleep(.025)
+                if not result and button=='RELEASE_X':result='No held-X release confirmed. Keep physical X held while clicking the test, then check X input in the Titan status. No retry was sent.'
                 if not result:result='Original manual '+button+' request sent once. No execution acknowledgment was observed; the standalone test does not provide one. Check Gtuner for CONSOLE TEST: Titan issuing '+button+' and watch Xbox. Sending does not confirm delivery.'
             except (OSError,subprocess.SubprocessError) as exc:result=str(exc)
             self.messages.put(('console_test_done',(result,log)))
@@ -973,12 +971,12 @@ class Desktop(tk.Tk):
         values={key:(str(var.get()) if key in ('direction','shot_mode') else
             float(var.get()) if type(defaults[key]) is float else int(var.get()))
             for key,var in self.green_vars.items()}
-        return green_config(dict(values,armed=self.trigger_armed.get()))
+        return green_config(dict(values,armed=self.trigger_armed.get(),shot_mode='timing'))
 
     def _shot_mode_changed(self):
         # A different controller mechanic always requires explicit re-arming.
         self._disarm_shots()
-        self.session_status.set('Shot mode changed — release X and RS, then arm when ready.')
+        self.session_status.set('Shot mode changed — release X, then arm when ready.')
 
     def _apply_green(self):
         try:config=self._green_values()
@@ -1019,13 +1017,13 @@ class Desktop(tk.Tk):
         if not self.live_active or not self._detector_status():return 'Wait for fresh AI detections before arming.'
         if not self.bridge_enabled.get() or not self.bridge_service or not self.bridge_service.status().get('ready'):
             return 'Connect and verify the Titan bridge before arming.'
-        if type(self.bridge_service.status().get('device_gate')) is not int:
-            return 'Install the exported Titan meter bridge 3.3, then restart the updated gtuner_meter worker.'
+        if type(self.bridge_service.status().get('device_gate')) is not int or not (self.bridge_service.status()['device_gate'] & 256):
+            return 'Install the exported X-only Titan meter bridge 3.4, then restart the updated gtuner_meter worker.'
         return None
 
     def _arm_shots(self):
         self.trigger_armed.set(True);self._apply_green()
-        if self.trigger_armed.get():self.session_status.set('ARMED — Rhythm: hold RS; Timing: hold X. Observed green controls output. Disarm Shots stops output.')
+        if self.trigger_armed.get():self.session_status.set('ARMED — X jumpshots: hold X; observed green releases X. Release X before the next shot.')
 
     def _disarm_shots(self):
         self.trigger_armed.set(False)
@@ -1729,8 +1727,9 @@ class Desktop(tk.Tk):
             if 'green' in data:
                 measurement=data['green'];trigger=data.get('trigger',{})
                 gate=self.bridge_service.status().get('device_gate') if self.bridge_service else None
-                reasons={0:'ready',1:'disarmed',2:'link timeout',3:'R3 cancel held',4:'release X and RS to reset',5:'waiting for physical hold',6:'waiting for green command',7:'green command expired',8:'shot action started'}
-                device_note=('Timing' if gate & 16 else 'Rhythm')+' / '+reasons.get(gate & 15,'unknown') if type(gate) is int else 'update meter GPC to 3.3 for diagnostics'
+                reasons={0:'ready',1:'disarmed',2:'link timeout',3:'R3 cancel held',4:'release X to reset',5:'waiting for physical hold',6:'waiting for green command',7:'green command expired',8:'shot action started'}
+                device_note=('Timing' if gate & 16 else 'Rhythm')+' / '+reasons.get(gate & 15,'unknown') if type(gate) is int else 'install X-only meter GPC 3.4'
+                if type(gate) is int:device_note+=' / X input: '+('HELD' if gate & 512 else 'released')
                 self.green_status.set(f"{'ARMED' if trigger.get('armed') else 'DRY RUN'} | "
                     f"in green: {measurement.get('in_green',False)} | event {trigger.get('event_id',0)} | "
                     f"Titan action {self.bridge_service.status().get('device_event',0) if self.bridge_service else 0} | {device_note} | "

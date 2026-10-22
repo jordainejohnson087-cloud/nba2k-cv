@@ -68,13 +68,13 @@ int main(){
   bytes[7]=0;bytes[8]=45;bytes[9]=0;bytes[10]=100;
   for(int n=0;n<4;++n){bytes[11+n]=(event>>(24-8*n))&255;bytes[19+n]=(seq>>(24-8*n))&255;}
   bytes[23]=0;bytes[24]=lifetime;bytes[25]=mode;
-  if(legacy){bytes[0]=84;bytes[1]=49;bytes[2]=legacy==3?0:legacy;}
+  if(legacy){bytes[0]=84;bytes[1]=49;bytes[2]=legacy==3?0:legacy==4?3:legacy;}
   test_tap=0;
   for(int n=0;n<32;++n){actual[n]=0;output[n]=0;}
   actual[17]=x;actual[20]=ry;actual[6]=r3;actual[4]=70;actual[5]=40;
   for(int n=0;n<32;++n)output[n]=actual[n];
   tick();
-  std::cout<<output[17]<<" "<<output[20]<<" "<<output[4]<<" "<<output[5]<<" "<<int(phase)<<" "<<fired_event<<" "<<blocked<<" "<<test_counter<<" "<<int(test_button)<<" "<<test_tap<<"\\n";
+  std::cout<<output[17]<<" "<<output[20]<<" "<<output[4]<<" "<<output[5]<<" "<<int(phase)<<" "<<fired_event<<" "<<blocked<<" "<<test_counter<<" "<<int(test_button)<<" "<<test_tap<<" "<<gate_word<<"\\n";
  }
 }
 '''
@@ -88,13 +88,13 @@ int main(){
     def test_host_shim_rejects_the_original_integer_threshold_error(self):
         root=Path(self.folder.name)
         broken=root/'integer_threshold.cpp'
-        broken.write_text(self.cpp_source.replace('>= 50.0','>= 50'))
+        broken.write_text(self.cpp_source.replace('> 0.0','> 0'))
         result=subprocess.run([self.compiler,'-std=c++11',str(broken),'-o',str(root/'broken')],
             capture_output=True,text=True,timeout=30)
         self.assertNotEqual(result.returncode,0)
         self.assertIn('deleted',result.stderr)
 
-    def run_frames(self,frames,mode=0):
+    def run_frames(self,frames,mode=1):
         rows=[]
         for frame in frames:
             values=dict(arm=1,seen=0,green=0,mode=mode,event=0,x=0,ry=0,r3=0,dt=5,direction=0,deliver=1,version=3,legacy=0,lifetime=100)
@@ -130,62 +130,47 @@ int main(){
 
     def test_timing_passes_x_then_releases_until_physical_release_without_rs(self):
         out=self.run_frames([{},dict(x=100,seen=1),dict(x=100,seen=1,green=1,event=1),
-            dict(x=100,event=1),dict(x=100,seen=1,green=1,event=2),{},dict(x=100,seen=1,event=2)],mode=1)
+            dict(x=100,event=1),dict(x=100,seen=1,green=1,event=2),{},dict(x=100,seen=1,event=2)])
         self.assertEqual([r[0] for r in out],[0,100,0,0,0,0,100])
         self.assertTrue(all(r[1]==0 for r in out))
         self.assertEqual([r[5] for r in out],[0,0,1,1,1,1,1])
 
-    def test_rhythm_flick_has_delay_duration_neutral_and_one_event_per_hold(self):
-        frames=[{},dict(ry=100,seen=1)]+[dict(ry=100,seen=1,green=1,event=1) for _ in range(40)]
-        out=self.run_frames(frames)
-        self.assertEqual(out[1][1],100)
-        flick=[i for i,r in enumerate(out) if r[1]==-100]
-        self.assertTrue(flick)
-        self.assertGreaterEqual((min(flick)-2)*5,45)
-        self.assertEqual(len(flick)*5,100)
-        self.assertEqual(out[-1][1],0)
-        self.assertTrue(all(r[0]==0 for r in out))
-        self.assertEqual(out[-1][5],1)
+    def test_manual_release_uses_same_latched_x_override_without_ai(self):
+        out=self.run_frames([{},dict(x=100),dict(x=100,legacy=4),dict(x=100,legacy=3),
+            dict(x=100,arm=0),dict(arm=0),dict(x=100,arm=0)])
+        self.assertEqual([r[0] for r in out],[0,100,0,0,0,0,100])
+        self.assertEqual(out[2][7:9],[1,3])
+        self.assertTrue(out[2][10] & 512)  # Raw X is held even though output is zero.
+        self.assertTrue(out[2][10] & 256)  # Dedicated release capability.
 
-    def test_no_flick_on_x_or_early_rs_release_or_unobserved_shot(self):
-        for frames in ([{},dict(x=100,seen=1),dict(x=100,seen=1,green=1,event=1)],
-                       [{},dict(ry=100,seen=1),{},dict(seen=1,green=1,event=1)],
-                       [{},dict(ry=100,seen=0,green=0,event=1)]):
-            out=self.run_frames(frames)
-            self.assertTrue(all(r[1]!=-100 and r[5]==0 for r in out))
+    def test_manual_release_without_physical_hold_is_not_acknowledged(self):
+        out=self.run_frames([{},dict(legacy=4),dict(legacy=3)])
+        self.assertEqual(out[-1][7],0)
 
-    def test_downward_flick_requires_upward_physical_hold(self):
-        out=self.run_frames([dict(direction=1),dict(direction=1,ry=-100,seen=1)]+
-            [dict(direction=1,ry=-100,seen=1,green=1,event=1) for _ in range(12)])
-        self.assertTrue(any(r[1]==100 for r in out))
+    def test_rhythm_mode_is_rejected_and_right_stick_never_changes(self):
+        out=self.run_frames([dict(mode=0,ry=100),dict(mode=0,x=100,ry=100,seen=1,green=1,event=1)])
+        self.assertEqual(out[-1][5],0);self.assertEqual(out[-1][0],100)
+        self.assertTrue(all(r[1]==100 for r in out))
 
-    def test_stick_neutral_and_hold_threshold_boundaries(self):
-        out=self.run_frames([dict(ry=20),dict(ry=19),dict(ry=49,seen=1),
-            dict(ry=50,seen=1,green=1,event=1),dict(ry=50,seen=1,event=1),
-            dict(ry=50,seen=1,green=1,event=2)])
-        self.assertTrue(out[0][6]);self.assertFalse(out[1][6])
-        self.assertEqual(out[2][5],0)
-        self.assertEqual(out[3][5],1)
-        self.assertEqual(out[-1][5],1)
+    def test_right_stick_and_click_do_not_block_x_shots(self):
+        out=self.run_frames([dict(ry=100),dict(x=100,ry=-100,r3=100),
+            dict(x=100,ry=-100,r3=100,seen=1,green=1,event=4)])
+        self.assertEqual(out[-1][0],0);self.assertEqual(out[-1][1],-100)
+        self.assertEqual(out[-1][5],4)
 
-    def test_cancel_stale_and_disarm_stop_pending_flick_and_require_release(self):
-        for cancel in (dict(r3=100),dict(arm=0),dict(deliver=0,dt=300)):
-            frames=[{},dict(ry=100,seen=1),dict(ry=100,seen=1,green=1,event=1),
-                    dict(ry=100,seen=1,green=1,event=1,**cancel),
-                    dict(ry=100,seen=1,green=1,event=2),{},dict(ry=100,seen=1),
-                    dict(ry=100,seen=1,green=1,event=3)]
-            out=self.run_frames(frames)
-            self.assertEqual(out[3][4],0)
-            self.assertTrue(out[3][6]);self.assertTrue(out[4][6])
-            self.assertEqual(out[3][0],0,'R3 must not be remapped to X')
-            self.assertEqual(out[-1][5],3)
+    def test_link_loss_before_event_requires_physical_release(self):
+        out=self.run_frames([{},dict(x=100),dict(x=100,deliver=0,dt=300),
+            dict(x=100,seen=1,green=1,event=1),{},dict(x=100),
+            dict(x=100,seen=1,green=1,event=2)])
+        self.assertTrue(out[2][6]);self.assertEqual(out[3][5],0)
+        self.assertEqual(out[-1][5],2);self.assertEqual(out[-1][0],0)
 
-    def test_mode_change_and_unknown_protocol_require_neutral_and_do_not_fire(self):
-        out=self.run_frames([{},dict(ry=100,seen=1),dict(mode=1,x=100,green=1,event=1),
-            dict(mode=1,x=100,seen=1),dict(mode=1),dict(mode=1,x=100,seen=1),
-            dict(mode=1,x=100,seen=1,green=1,event=2)])
-        self.assertTrue(out[2][6]);self.assertTrue(out[3][6]);self.assertEqual(out[-1][0],0)
-        self.assertEqual(out[-1][5],2)
-        for invalid in (dict(mode=9),dict(version=2)):
-            out=self.run_frames([{},dict(x=100,ry=100,seen=1,green=1,event=1,**invalid)])
-            self.assertEqual(out[-1][5],0);self.assertTrue(out[-1][6])
+    def test_disarm_or_unknown_wire_version_cannot_start_new_release(self):
+        for invalid in (dict(arm=0),dict(version=2)):
+            out=self.run_frames([{},dict(x=100,seen=1,green=1,event=1,**invalid)])
+            self.assertEqual(out[-1][5],0);self.assertEqual(out[-1][0],100)
+
+    def test_released_x_cannot_be_repressed_by_a_timeout_while_still_held(self):
+        out=self.run_frames([{},dict(x=100),dict(x=100,seen=1,green=1,event=4),
+            dict(x=100,deliver=0,dt=300),dict(x=100,arm=0),dict(arm=0),dict(x=100,arm=0)])
+        self.assertEqual([r[0] for r in out],[0,100,0,0,0,0,100])

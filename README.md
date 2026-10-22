@@ -1,5 +1,18 @@
 # NBA 2K shot-meter CV pipeline
 
+## X-only Xbox jumpshots (2026102206)
+
+The current app uses **Timing: hold Xbox X, then release X on a fresh observed green event**. Rhythm is deferred. Bridge **3.4** never rewrites the right stick, RT or movement. After an accepted release, X output remains zero until the physical button is released; disarming or a link timeout cannot turn the held button back into a second press. Release X before arming.
+
+The app now shows **X input: HELD/released**, independently of its output override, and offers **Release Held X — test**. This test disarms AI output and sends one manual command through PowerShell to the running meter worker. It calls the same X suppression operation as AI timing. Titan acknowledges it only when physical X is held. An acknowledgment reports device execution, not Xbox receipt.
+
+1. Install the exported `titan_meter.gpc` **3.4** in the selected Titan slot and restart the updated `gtuner_meter` Computer Vision worker with Null Input. Stop any standalone test worker that owns port 26741. An app update cannot reprogram a stored Titan script.
+2. In practice, hold X and keep holding it. Confirm **X input: HELD**, then click **Release Held X — test**. Check Gtuner output X becomes zero and whether the Xbox releases the shot. No AI or capture is needed for this test.
+3. Physically release X. Start capture/detection, arm Timing, and hold X through the green. Inspect the observed green event, Titan action ID and Xbox result separately. If the manual release works but AI release does not, investigate the green event and its freshness rather than the console transport.
+
+Software coverage exercises physical X holds, manual command delivery and acknowledgment, stale/link-loss gates, no RS override, and suppression until physical release. Native Windows tests remain separate from vendor GPC compilation and physical Xbox validation. Historical rhythm notes below describe earlier releases and do not apply to the current X-only mode.
+
+
 ## Green-event delivery and Titan shot gates (2026102205)
 
 Bridge **3.3** fixes two reproduced cases where a valid detector event never started an action: the script treated each short observation TTL as a controller-link timeout, latching out held inputs between slower GCV callbacks; it also required the Titan itself to sample a pre-green meter frame, even though the detector had already verified the approach. Titan now tracks the physical hold independently, accepts only a fresh observed green token, and uses a separate **250 ms link watchdog**. Explicit disarm, R3 cancel, mode changes and link loss still require a released/neutral controller before rearming. An accepted rhythm command completes its configured delay/hold while the link remains alive; expired observations cannot start a new action.

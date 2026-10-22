@@ -59,7 +59,7 @@ class GateTests(unittest.TestCase):
         self.assertFalse(result['eligible']);self.assertFalse(result['candidate'])
 
     def test_mode_switch_resets_approach_and_latch(self):
-        gate=GreenGate(green_config(dict(armed=True)))
+        gate=GreenGate(green_config(dict(armed=True,shot_mode='rhythm')))
         gate.update(state(),measurement(False),10,now=10)
         gate.configure(dict(gate.config,shot_mode='timing'))
         result=gate.update(state(),measurement(True),10,now=10)

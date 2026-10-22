@@ -34,7 +34,7 @@ def write_private_config(path,info):
 
 def neutral_bridge_state():
     return dict(status='absent',fill=None,shot_id=None,trigger=dict(armed=False,green=False,
-        valid=False,eligible=False,event_id=0,delay_ms=0,hold_ms=10,max_age_ms=100,direction='up'))
+        valid=False,eligible=False,event_id=0,delay_ms=0,hold_ms=10,max_age_ms=100,direction='up',shot_mode='timing'))
 
 
 def validate_bridge_state(state,stamp):

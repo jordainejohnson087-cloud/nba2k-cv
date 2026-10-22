@@ -8,7 +8,7 @@ import time
 
 DEFAULT_GREEN = dict(armed=False, hue_low=35, hue_high=90, saturation_min=90,
     value_min=70, row_coverage=.12, min_confidence=.5, confirmations=1,
-    max_age_ms=100, rearm_ms=500, delay_ms=45, hold_ms=100, direction='up', shot_mode='rhythm')
+    max_age_ms=100, rearm_ms=500, delay_ms=45, hold_ms=100, direction='up', shot_mode='timing')
 
 
 def green_config(overrides=None):

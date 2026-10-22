@@ -155,7 +155,7 @@ def main():
                      patch.object(app,'_connect_bridge') as connect,patch.object(app,'_start_capture') as capture,\
                      patch.object(app,'_capture_ready',return_value=True),\
                      patch.object(app,'_detector_status',return_value={'timestamp':time.time(),'device':'0'}),\
-                     patch.object(app.bridge_service,'status',return_value={'ready':True,'device_gate':0}),\
+                     patch.object(app.bridge_service,'status',return_value={'ready':True,'device_gate':272}),\
                      patch.object(app,'_live',side_effect=start_engine) as engine:
                     app._start_session();connect.assert_called_once();capture.assert_called_once()
                     app.capture_active=True;app._session_tick();engine.assert_called_once()
@@ -167,7 +167,7 @@ def main():
                     assert app._green_values()['shot_mode']=='timing'
                     app._arm_shots();assert app.trigger_armed.get()
                     app._disarm_shots();assert not app.trigger_armed.get()
-                    app.green_vars['shot_mode'].set('rhythm')
+                    app.green_vars['shot_mode'].set('timing')
                     app.shot_mode_menu.event_generate('<<ComboboxSelected>>')
                     assert not app.trigger_armed.get()
                     assert app.capture_active and app.live_active

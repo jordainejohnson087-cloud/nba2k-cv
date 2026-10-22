@@ -55,7 +55,7 @@ class GCVWorker:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--tap', required=True, choices=('A', 'X'))
+    parser.add_argument('--tap', required=True, choices=('A', 'X', 'RELEASE_X'))
     parser.add_argument('--port',type=int,default=PORT,help='Loopback test port (normally 26741)')
     args = parser.parse_args()
     if not 1<=args.port<=65535:parser.error('Port must be 1 through 65535')

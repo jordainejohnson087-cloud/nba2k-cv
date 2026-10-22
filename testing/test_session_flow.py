@@ -21,7 +21,7 @@ class SessionTests(unittest.TestCase):
             capture_active=True,live_active=True,active_out=out,preparing_bridge=False,
             trigger_armed=Variable(False),bridge_enabled=Variable(True),status=Variable(''),session_status=Variable(''),
             bridge_service=Mock(),_save=Mock(),_capture_ready=Mock(return_value=True),after=Mock(),_live=Mock())
-        ui.bridge_service.status.return_value=dict(ready=True,device_gate=0)
+        ui.bridge_service.status.return_value=dict(ready=True,device_gate=272)
         for name in ('_session_tick','_detector_status','_arming_blocker','_apply_green','_arm_shots','_disarm_shots','_shot_mode_changed'):
             setattr(ui,name,MethodType(getattr(Desktop,name),ui))
         ui._green_values=lambda:green_config(dict(armed=ui.trigger_armed.get()))
@@ -65,7 +65,7 @@ class SessionTests(unittest.TestCase):
             self.assertFalse(ui.trigger_armed.get())
             ui.bridge_service.allow_output.assert_called_with(False)
             self.assertTrue(ui.capture_active);self.assertTrue(ui.live_active)
-            self.assertIn('release X and RS',ui.session_status.get())
+            self.assertIn('release X',ui.session_status.get())
 
     def test_settings_write_failure_disarms_host(self):
         with tempfile.TemporaryDirectory() as folder:

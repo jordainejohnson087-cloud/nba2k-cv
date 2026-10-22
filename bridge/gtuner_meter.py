@@ -31,7 +31,7 @@ def encode(packet, fresh):
     for key,low,high in [('delay_ms',0,250),('hold_ms',10,500),('max_age_ms',25,250),('event_id',0,0xffffffff)]:
         if type(trigger.get(key)) is not int or not low<=trigger[key]<=high:raise ValueError('Invalid trigger '+key)
     if trigger.get('direction') not in ('up','down'):raise ValueError('Invalid direction')
-    mode=trigger.get('shot_mode','rhythm')
+    mode=trigger.get('shot_mode','timing')
     if mode not in ('rhythm','timing'):raise ValueError('Invalid shot mode')
     shot=packet.get('shot_id') or 0
     if type(shot) is not int or not 0<=shot<=0xffffffff:raise ValueError('Invalid shot ID')
@@ -143,12 +143,12 @@ class GCVWorker:
                     age=time.time()-float(stamp)
                     armed=self.packet.get('trigger',{}).get('armed',False) and now-self.last_packet<STALE_SECONDS
                     if (not neutral and not command and not armed and now-self.last_test>=.8
-                        and prefix=='T2TEST' and button in ('A','X') and 0<=age<=.5):
-                        command={'A':1,'X':2}[button]
+                        and prefix=='T2TEST' and button in ('A','X','RELEASE_X') and 0<=age<=.5):
+                        command={'A':1,'X':2,'RELEASE_X':3}[button]
                 except (ValueError,UnicodeError):pass
         if command:
             self.last_test=now;self.test_reset=True
-            print('CONSOLE TEST: forwarding one '+('A' if command==1 else 'X')+' tap to Titan; Xbox receipt unverified.',flush=True)
+            print('CONSOLE TEST: forwarding one '+{1:'A tap',2:'X tap',3:'held X release'}[command]+' to Titan; Xbox receipt unverified.',flush=True)
             return frame,bytearray((84,49,command))
         if neutral:return frame,bytearray((84,49,0))
         return frame, encode(self.packet, now-self.last_packet < STALE_SECONDS and

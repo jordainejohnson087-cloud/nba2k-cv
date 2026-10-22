@@ -26,7 +26,7 @@ class ManualPathTests(unittest.TestCase):
             port=worker.test_socket.getsockname()[1]
             gtuner=SimpleNamespace(gpc_string=lambda:'T2CV:1:0:0:2:3:0:0')
             with patch.dict(sys.modules,gtuner=gtuner):
-                for button,command in (('A',1),('X',2)):
+                for button,command in (('A',1),('X',2),('RELEASE_X',3)):
                     worker.last_test=-1
                     result=subprocess.run([sys.executable,str(ROOT/'testing/console_button_check.py'),
                         '--tap',button,'--port',str(port)],capture_output=True,text=True,timeout=5)
@@ -98,6 +98,30 @@ class ConsoleUiTests(unittest.TestCase):
                 kind,(result,log)=ui.messages.get_nowait()
                 self.assertEqual(kind,'console_test_done');self.assertIn('Titan reports issuing A',result)
                 self.assertIn('Xbox receipt is unverified',result)
+
+    def test_manual_held_x_release_uses_powershell_and_matching_ack(self):
+        with tempfile.TemporaryDirectory() as folder:
+            ui=self.ui(Path(folder))
+            ui.bridge_service.status.return_value.update(device_gate=272)
+            def run(*args,**kwargs):
+                ui.bridge_service.status.return_value=dict(ready=True,device_test_count=1,device_test_button=3)
+                return SimpleNamespace(returncode=0,stdout='Sent one RELEASE_X request.',stderr='')
+            with patch('app.sys.platform','win32'),patch.object(BridgeProcess,'powershell_command',return_value=['powershell.exe','test']) as command,\
+                 patch('app.threading.Thread') as thread,patch('app.subprocess.run',side_effect=run) as launch:
+                thread.return_value.start.side_effect=lambda:thread.call_args.kwargs['target']()
+                Desktop._console_tap(ui,'RELEASE_X')
+                ui._disarm_shots.assert_called_once();launch.assert_called_once()
+                self.assertEqual(command.call_args.args[1][-2:],['--tap','RELEASE_X'])
+                self.assertIn('releasing held X until physical release',ui.messages.get_nowait()[1][0])
+
+    def test_held_x_release_requires_new_meter_script_capability(self):
+        for gate in (None,0,16):
+            with self.subTest(gate=gate),tempfile.TemporaryDirectory() as folder:
+                ui=self.ui(Path(folder));ui.bridge_service.status.return_value.update(device_gate=gate)
+                with patch('app.sys.platform','win32'),patch('app.subprocess.run') as launch:
+                    Desktop._console_tap(ui,'RELEASE_X')
+                    launch.assert_not_called();ui._disarm_shots.assert_not_called()
+                    self.assertIn('bridge 3.4',ui.console_test_status.get())
 
     def test_uncertain_sender_timeout_is_not_retried(self):
         with tempfile.TemporaryDirectory() as folder:
