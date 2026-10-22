@@ -103,6 +103,13 @@ class ProtocolTests(unittest.TestCase):
             self.assertEqual(data[5],0)
         self.assertEqual(gcv.encode(self.packet(),False)[4:6],b'\x00\x00')
 
+    def test_near_deadline_cannot_trigger_but_does_not_pretend_user_disarmed(self):
+        packet=self.packet();packet['sent_at']=10
+        with patch.object(gcv.time,'time',return_value=10.09):data=gcv.encode(packet,True)
+        self.assertEqual(data[4],1);self.assertEqual(data[5],0);self.assertEqual(data[3],0)
+        with patch.object(gcv.time,'time',return_value=10.11):data=gcv.encode(packet,True)
+        self.assertEqual(data[4:6],bytes((0,0)))
+
     def test_invalid_wire_settings_are_rejected(self):
         for key,value in [('delay_ms',10000),('hold_ms',True),('event_id',-1),('green',1)]:
             packet=self.packet();packet['trigger'][key]=value

@@ -21,7 +21,7 @@ class SessionTests(unittest.TestCase):
             capture_active=True,live_active=True,active_out=out,preparing_bridge=False,
             trigger_armed=Variable(False),bridge_enabled=Variable(True),status=Variable(''),session_status=Variable(''),
             bridge_service=Mock(),_save=Mock(),_capture_ready=Mock(return_value=True),after=Mock(),_live=Mock())
-        ui.bridge_service.status.return_value=dict(ready=True)
+        ui.bridge_service.status.return_value=dict(ready=True,device_gate=0)
         for name in ('_session_tick','_detector_status','_arming_blocker','_apply_green','_arm_shots','_disarm_shots','_shot_mode_changed'):
             setattr(ui,name,MethodType(getattr(Desktop,name),ui))
         ui._green_values=lambda:green_config(dict(armed=ui.trigger_armed.get()))
@@ -45,7 +45,7 @@ class SessionTests(unittest.TestCase):
             self.assertTrue(ui.capture_active);self.assertTrue(ui.live_active)
 
     def test_arming_rejects_stale_engine_missing_capture_wrong_bridge_and_preparation(self):
-        for condition in ('stale','capture','bridge','preparing','console_test'):
+        for condition in ('stale','capture','bridge','preparing','console_test','old_gpc'):
             with self.subTest(condition=condition),tempfile.TemporaryDirectory() as folder:
                 out=Path(folder);ui=self.ui(out)
                 if condition=='stale':(out/'live_status.json').write_text(json.dumps(dict(timestamp=time.time()-5)))
@@ -53,6 +53,7 @@ class SessionTests(unittest.TestCase):
                 if condition=='bridge':ui.bridge_service.status.return_value=dict(ready=False)
                 if condition=='preparing':ui.preparing_bridge=True
                 if condition=='console_test':ui.console_test_busy=True
+                if condition=='old_gpc':ui.bridge_service.status.return_value=dict(ready=True)
                 ui._arm_shots()
                 self.assertFalse(ui.trigger_armed.get())
                 ui.bridge_service.allow_output.assert_called_with(False)

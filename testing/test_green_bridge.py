@@ -32,7 +32,10 @@ class GreenBridgeTests(unittest.TestCase):
     def test_timing_observed_green_and_disarm(self):
         self.check_mode('timing')
 
-    def check_mode(self,mode):
+    def test_brief_green_pulse_survives_a_slow_gcv_callback(self):
+        self.check_mode('timing',callback_interval=.06,pulse=True)
+
+    def check_mode(self,mode,callback_interval=.005,pulse=False):
         with patch.object(gcv,'PORT',0):worker=gcv.GCVWorker(1920,1080)
         payloads=[];stopped=threading.Event();sequence=0;event=0;counter=0;errors=[]
         def echo():return f'T2CV:{counter}:{sequence}:{event}:2:3'
@@ -45,7 +48,7 @@ class GreenBridgeTests(unittest.TestCase):
                         sequence=int.from_bytes(data[19:23],'big')
                         if data[4] and data[5]:event=int.from_bytes(data[11:15],'big')
                         payloads.append(data)
-                    stopped.wait(.005)
+                    stopped.wait(callback_interval)
             except Exception as exc:errors.append(exc)
         with patch.dict(sys.modules,gtuner=SimpleNamespace(gpc_string=echo)):
             thread=threading.Thread(target=callbacks,daemon=True);thread.start()
@@ -59,7 +62,7 @@ class GreenBridgeTests(unittest.TestCase):
                 with tempfile.TemporaryDirectory() as folder:
                     config=Path(folder)/'bridge.json';service.write_config(config);sdk=BridgeServiceClient(config)
                     candidates=0
-                    for front in (70,33,33):
+                    for front in ((70,33,20) if pulse else (70,33,33)):
                         captured=time.time();frame=fixture.frame(front=front)
                         fill=estimate_fill(frame,fixture.box)
                         measured=measure_green(frame,fixture.box,fill,gate.config)

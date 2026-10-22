@@ -898,7 +898,7 @@ class Desktop(tk.Tk):
                     else:
                         result=current
                     if not result['ready'] and not read_only:
-                        error=result['stage']+'. Connect Titan PROG to this PC, compile and install the updated bridge 3.2 titan_meter.gpc in the selected slot, and start bridge/gtuner_meter.py in Gtuner Computer Vision with Null Video Input. Keep that worker running; opening the files alone does not start it. Console OUTPUT/authentication is separate.'
+                        error=result['stage']+'. Connect Titan PROG to this PC, compile and install the updated bridge 3.3 titan_meter.gpc in the selected slot, and start bridge/gtuner_meter.py in Gtuner Computer Vision with Null Video Input. Keep that worker running; opening the files alone does not start it. Console OUTPUT/authentication is separate.'
                 if found and result is not None:result=dict(result,gtuner_path=str(found))
             except Exception as exc:
                 error=str(exc);result=service.status()
@@ -1019,6 +1019,8 @@ class Desktop(tk.Tk):
         if not self.live_active or not self._detector_status():return 'Wait for fresh AI detections before arming.'
         if not self.bridge_enabled.get() or not self.bridge_service or not self.bridge_service.status().get('ready'):
             return 'Connect and verify the Titan bridge before arming.'
+        if type(self.bridge_service.status().get('device_gate')) is not int:
+            return 'Install the exported Titan meter bridge 3.3, then restart the updated gtuner_meter worker.'
         return None
 
     def _arm_shots(self):
@@ -1726,9 +1728,12 @@ class Desktop(tk.Tk):
                 f"{data['status']} | preview age {age:.1f}s" + (" • STALE" if age>1 else ""))
             if 'green' in data:
                 measurement=data['green'];trigger=data.get('trigger',{})
+                gate=self.bridge_service.status().get('device_gate') if self.bridge_service else None
+                reasons={0:'ready',1:'disarmed',2:'link timeout',3:'R3 cancel held',4:'release X and RS to reset',5:'waiting for physical hold',6:'waiting for green command',7:'green command expired',8:'shot action started'}
+                device_note=('Timing' if gate & 16 else 'Rhythm')+' / '+reasons.get(gate & 15,'unknown') if type(gate) is int else 'update meter GPC to 3.3 for diagnostics'
                 self.green_status.set(f"{'ARMED' if trigger.get('armed') else 'DRY RUN'} | "
                     f"in green: {measurement.get('in_green',False)} | event {trigger.get('event_id',0)} | "
-                    f"Titan flick {self.bridge_service.status().get('device_event',0) if self.bridge_service else 0} | "
+                    f"Titan action {self.bridge_service.status().get('device_event',0) if self.bridge_service else 0} | {device_note} | "
                     f"{measurement.get('reason','')}" + (' • STALE' if age>.25 else ''))
             if self.capture_active or (self.active_out/'live_bgr.bin').exists():return
             image=self.active_out/'preview.png'

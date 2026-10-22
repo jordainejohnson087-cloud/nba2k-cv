@@ -37,13 +37,13 @@ def encode(packet, fresh):
     if type(shot) is not int or not 0<=shot<=0xffffffff:raise ValueError('Invalid shot ID')
     observed_age=max(0,(time.time()-packet.get('sent_at',0))*1000)
     remaining=max(0,trigger['max_age_ms']-observed_age)
-    fresh=fresh and remaining>=25
-    armed=bool(fresh and trigger['armed'])
-    green=bool(armed and status==1 and trigger['green'] and trigger['valid'] and trigger['eligible'])
+    observed_fresh=fresh and remaining>=25
+    armed=bool(fresh and remaining>0 and trigger['armed'])
+    green=bool(observed_fresh and armed and status==1 and trigger['green'] and trigger['valid'] and trigger['eligible'])
     # 0, 'M', v3, observed status, arm, green, direction, delay, hold,
     # event ID, tracked shot ID, transport sequence, remaining lifetime, shot mode.
     # v2 GPC rejects this version rather than using the wrong shooting mechanics.
-    return bytearray(struct.pack('>7BHHIIIHB',0,77,3,status if fresh else 0,int(armed),int(green),
+    return bytearray(struct.pack('>7BHHIIIHB',0,77,3,status if observed_fresh else 0,int(armed),int(green),
         int(trigger['direction']=='down'),trigger['delay_ms'],trigger['hold_ms'],
         trigger['event_id'],shot,packet.get('seq',0)&0xffffffff,max(25,int(remaining)),int(mode=='timing')))
 
@@ -72,6 +72,7 @@ class GCVWorker:
         self.device_event = None
         self.active_slot = None
         self.device_protocol = None
+        self.device_gate = None
 
     def process(self, frame):
         import gtuner
@@ -86,12 +87,13 @@ class GCVWorker:
                 if text.startswith('T2CV:'):
                     parts=text[5:].strip().split(':')
                     counter = int(parts[0])
-                    if len(parts) in (3,4,5,7):
+                    if len(parts) in (3,4,5,7,8):
                         self.device_sequence=int(parts[1]);self.device_event=int(parts[2])
-                    self.active_slot=int(parts[3]) if len(parts) in (4,5,7) and 1<=int(parts[3])<=9 else None
-                    self.device_protocol=int(parts[4]) if len(parts) in (5,7) else None
-                    self.device_test_count=int(parts[5]) if len(parts)==7 else None
-                    self.device_test_button=int(parts[6]) if len(parts)==7 else None
+                    self.active_slot=int(parts[3]) if len(parts) in (4,5,7,8) and 1<=int(parts[3])<=9 else None
+                    self.device_protocol=int(parts[4]) if len(parts) in (5,7,8) else None
+                    self.device_test_count=int(parts[5]) if len(parts) in (7,8) else None
+                    self.device_test_button=int(parts[6]) if len(parts) in (7,8) else None
+                    self.device_gate=int(parts[7]) if len(parts)==8 else None
                     if counter != self.hardware_counter:
                         self.hardware_counter = counter
                         self.last_hardware = now
@@ -123,7 +125,7 @@ class GCVWorker:
                     print('NBA2K CV bridge: valid app telemetry received; sending acknowledgments.',flush=True)
                 self.last_packet = now
                 ack = dict(session=packet['session'],seq=packet['seq'],worker_protocol=3,device_protocol=self.device_protocol,
-                    test_available=self.test_socket is not None,device_test_count=self.device_test_count,device_test_button=self.device_test_button,
+                    device_gate=self.device_gate,test_available=self.test_socket is not None,device_test_count=self.device_test_count,device_test_button=self.device_test_button,
                     hardware_counter=self.hardware_counter,active_slot=self.active_slot,device_sequence=self.device_sequence,device_event=self.device_event,
                     hardware_age_ms=(now-self.last_hardware)*1000 if self.last_hardware is not None else None)
                 self.socket.sendto(json.dumps(ack).encode(),peer)

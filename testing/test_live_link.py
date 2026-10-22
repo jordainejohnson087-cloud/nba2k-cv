@@ -199,3 +199,15 @@ class SlotEvidenceTests(unittest.TestCase):
             with patch.dict(sys.modules,{'gtuner':gtuner}):worker.process(None)
             self.assertIsNone(worker.active_slot)
         finally:worker.socket.close()
+
+    def test_worker_decodes_titan_mode_and_gate_diagnostics(self):
+        with patch.object(gcv,'PORT',0),patch.object(gcv,'TEST_PORT',0):worker=gcv.GCVWorker(1,1)
+        try:
+            gtuner=SimpleNamespace(gpc_string=lambda:b'T2CV:1:42:5:2:3:0:0:21')
+            with patch.dict(sys.modules,{'gtuner':gtuner}):worker.process(None)
+            self.assertEqual(worker.device_gate,21)  # Timing + waiting for physical hold.
+            self.assertEqual(worker.device_event,5);self.assertEqual(worker.active_slot,2)
+            gtuner.gpc_string=lambda:b'T2CV:2:43:5:2:3:0:0'
+            with patch.dict(sys.modules,{'gtuner':gtuner}):worker.process(None)
+            self.assertIsNone(worker.device_gate)
+        finally:worker.__del__()

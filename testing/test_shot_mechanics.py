@@ -59,15 +59,15 @@ uint8 cv_byte(uint8 offset);
 '''
         harness='''
 int main(){
- int arm,seen,green_value,mode,event,x,ry,r3,dt,dir,deliver,version,legacy;
+ int arm,seen,green_value,mode,event,x,ry,r3,dt,dir,deliver,version,legacy,lifetime;
  unsigned seq=0;
- while(std::cin>>arm>>seen>>green_value>>mode>>event>>x>>ry>>r3>>dt>>dir>>deliver>>version>>legacy){
+ while(std::cin>>arm>>seen>>green_value>>mode>>event>>x>>ry>>r3>>dt>>dir>>deliver>>version>>legacy>>lifetime){
   delta=dt; fresh=deliver; ++seq;
   bytes[0]=0;bytes[1]=77;bytes[2]=version;bytes[3]=seen;
   bytes[4]=arm;bytes[5]=green_value;bytes[6]=dir;
   bytes[7]=0;bytes[8]=45;bytes[9]=0;bytes[10]=100;
   for(int n=0;n<4;++n){bytes[11+n]=(event>>(24-8*n))&255;bytes[19+n]=(seq>>(24-8*n))&255;}
-  bytes[23]=0;bytes[24]=100;bytes[25]=mode;
+  bytes[23]=0;bytes[24]=lifetime;bytes[25]=mode;
   if(legacy){bytes[0]=84;bytes[1]=49;bytes[2]=legacy==3?0:legacy;}
   test_tap=0;
   for(int n=0;n<32;++n){actual[n]=0;output[n]=0;}
@@ -97,7 +97,7 @@ int main(){
     def run_frames(self,frames,mode=0):
         rows=[]
         for frame in frames:
-            values=dict(arm=1,seen=0,green=0,mode=mode,event=0,x=0,ry=0,r3=0,dt=5,direction=0,deliver=1,version=3,legacy=0)
+            values=dict(arm=1,seen=0,green=0,mode=mode,event=0,x=0,ry=0,r3=0,dt=5,direction=0,deliver=1,version=3,legacy=0,lifetime=100)
             values.update(frame)
             rows.append(' '.join(str(value) for value in values.values()))
         result=subprocess.run([str(self.binary)],input='\n'.join(rows)+'\n',capture_output=True,text=True,timeout=5,check=True)
@@ -105,6 +105,22 @@ int main(){
         self.assertEqual(len(outputs),len(frames))
         self.assertTrue(all(row[2:4]==[70,40] for row in outputs),'RT and movement changed')
         return outputs
+
+    def test_slow_gcv_callbacks_do_not_latch_out_a_fresh_timing_event(self):
+        frames=[dict(mode=1,lifetime=35)]
+        frames += [dict(mode=1,lifetime=35,deliver=0) for _ in range(13)]
+        frames += [dict(mode=1,lifetime=35,x=100,seen=1)]
+        frames += [dict(mode=1,lifetime=35,x=100,deliver=0) for _ in range(13)]
+        frames += [dict(mode=1,lifetime=35,x=100,seen=1,green=1,event=5)]
+        out=self.run_frames(frames,mode=1)
+        self.assertEqual(out[-1][0],0)
+        self.assertEqual(out[-1][5],5)
+
+    def test_controller_hold_can_precede_first_observed_gcv_callback(self):
+        out=self.run_frames([{},dict(x=100),dict(x=100,deliver=0),
+            dict(x=100,seen=1,green=1,event=5)],mode=1)
+        self.assertEqual(out[-1][5],5)
+        self.assertEqual(out[-1][0],0)
 
     def test_manual_a_x_protocol_bypasses_meter_gating_once_and_cancels_shots(self):
         out=self.run_frames([{},dict(legacy=1),dict(legacy=1),dict(legacy=3),dict(legacy=2),{}])
@@ -134,7 +150,7 @@ int main(){
     def test_no_flick_on_x_or_early_rs_release_or_unobserved_shot(self):
         for frames in ([{},dict(x=100,seen=1),dict(x=100,seen=1,green=1,event=1)],
                        [{},dict(ry=100,seen=1),{},dict(seen=1,green=1,event=1)],
-                       [{},dict(ry=100,seen=1,green=1,event=1)]):
+                       [{},dict(ry=100,seen=0,green=0,event=1)]):
             out=self.run_frames(frames)
             self.assertTrue(all(r[1]!=-100 and r[5]==0 for r in out))
 
@@ -148,11 +164,12 @@ int main(){
             dict(ry=50,seen=1,green=1,event=1),dict(ry=50,seen=1,event=1),
             dict(ry=50,seen=1,green=1,event=2)])
         self.assertTrue(out[0][6]);self.assertFalse(out[1][6])
-        self.assertEqual(out[3][5],0)
-        self.assertEqual(out[-1][5],2)
+        self.assertEqual(out[2][5],0)
+        self.assertEqual(out[3][5],1)
+        self.assertEqual(out[-1][5],1)
 
     def test_cancel_stale_and_disarm_stop_pending_flick_and_require_release(self):
-        for cancel in (dict(r3=100),dict(arm=0),dict(deliver=0,dt=150)):
+        for cancel in (dict(r3=100),dict(arm=0),dict(deliver=0,dt=300)):
             frames=[{},dict(ry=100,seen=1),dict(ry=100,seen=1,green=1,event=1),
                     dict(ry=100,seen=1,green=1,event=1,**cancel),
                     dict(ry=100,seen=1,green=1,event=2),{},dict(ry=100,seen=1),

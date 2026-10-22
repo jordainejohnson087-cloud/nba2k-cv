@@ -1,5 +1,15 @@
 # NBA 2K shot-meter CV pipeline
 
+## Green-event delivery and Titan shot gates (2026102205)
+
+Bridge **3.3** fixes two reproduced cases where a valid detector event never started an action: the script treated each short observation TTL as a controller-link timeout, latching out held inputs between slower GCV callbacks; it also required the Titan itself to sample a pre-green meter frame, even though the detector had already verified the approach. Titan now tracks the physical hold independently, accepts only a fresh observed green token, and uses a separate **250 ms link watchdog**. Explicit disarm, R3 cancel, mode changes and link loss still require a released/neutral controller before rearming. An accepted rhythm command completes its configured delay/hold while the link remains alive; expired observations cannot start a new action.
+
+The asynchronous detector client and bridge host now retain one valid observed green event ahead of ordinary video-state updates. Its **first capture timestamp** is preserved; repeated copies cannot refresh its deadline. The event is eligible for delivery only while at least the existing 25 ms GCV reserve remains in its configured maximum age. Disarming, changing mechanics, clearing or losing the bridge cancels pending output. A later non-green, absent or predicted frame cannot manufacture a trigger and does not erase an already observed, still-fresh event. Current video state remains latest-only. Near-deadline packets that cannot trigger no longer masquerade as an explicit user disarm while the source observation is still within its age limit.
+
+The live status now shows **Titan action** plus the script's actual mode and gate: disarmed, link timeout, R3 held, release X/RS to reset, waiting for physical hold, waiting for green, expired green, or action started. The heartbeat has an optional eighth field carrying this gate/mode word; the 26-byte v3 command payload is unchanged. **Install the exported `titan_meter.gpc` 3.3 and restart the updated `gtuner_meter` worker.** Arming requires the new diagnostic capability so an older script cannot silently keep the old gates.
+
+Regression tests first reproduced both failures in the actual GPC main-body host shim. Coverage now includes 35 ms observation lifetimes with roughly 70 ms GCV gaps, physical holds before the first observed callback, brief green pulses through the HTTP/UDP/GCV path, cancellation and unchanged event deadlines. Native Windows software tests are separate from the vendor GPC compiler and physical Xbox shot validation.
+
 ## Restore the original manual output path (2026102204)
 
 The A/X diagnostic buttons now send the original `T2TEST` command even when the app's meter bridge is not ready, the API is unavailable, or there is no new Titan heartbeat/counter. The previous button incorrectly required the newer bridge's readiness before permitting a test of that bridge. This prevented using the actual standalone pair that had worked on the console.

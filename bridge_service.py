@@ -59,6 +59,38 @@ def validate_bridge_state(state,stamp):
 _KEEP_EXPECTED_SLOT=object()
 
 
+class TriggerLatch:
+    """One observed event, retaining its first source timestamp and deadline.
+
+    Video state remains latest-only. A brief valid event must survive replacement
+    by the next detected frame long enough for the slower GCV callback to read it.
+    """
+    def __init__(self):self.pending=None;self.last_id=None
+
+    def clear(self):self.pending=None;self.last_id=None
+
+    def offer(self,state,stamp):
+        trigger=state['trigger']
+        if not trigger['armed']:
+            self.pending=None;return
+        if self.pending is not None:
+            old=self.pending[0]['trigger']
+            if any(old.get(key,'rhythm')!=trigger.get(key,'rhythm') for key in ('shot_mode','direction','delay_ms','hold_ms','max_age_ms')):
+                self.pending=None
+        if (state['status']=='detected' and trigger['valid'] and trigger['eligible'] and trigger['green'] and trigger['event_id']
+            and trigger['event_id']!=self.last_id):
+            self.last_id=trigger['event_id'];self.pending=(state,stamp)
+
+    def peek(self,now):
+        if self.pending is not None:
+            state,stamp=self.pending
+            if not 0<=(now-stamp)*1000<=state['trigger']['max_age_ms']-25:self.pending=None
+        return self.pending
+
+    def pop(self,now):
+        value=self.peek(now);self.pending=None;return value
+
+
 class BridgeService:
     def __init__(self,gtuner_port=26740):
         self.client=BridgeClient(gtuner_port)
@@ -66,7 +98,7 @@ class BridgeService:
         self.first_sequence=self.client.seq+1
         self.token=secrets.token_urlsafe(32)
         self.enabled=False;self.output_allowed=False;self.expected_slot=None
-        self.latest=None;self.error=None
+        self.latest=None;self.error=None;self.events=TriggerLatch()
         self.lock=threading.Lock();self.wake=threading.Event();self.stopped=threading.Event()
         owner=self
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -143,21 +175,25 @@ class BridgeService:
         with self.lock:
             if enabled is not None:self.enabled=bool(enabled)
             if expected_slot is not _KEEP_EXPECTED_SLOT:self.expected_slot=expected_slot
-            if not self.enabled:self.latest=None;self.output_allowed=False
+            if not self.enabled:self.latest=None;self.output_allowed=False;self.events.clear()
         self.wake.set()
 
     def allow_output(self,allowed):
-        with self.lock:self.output_allowed=bool(allowed)
+        with self.lock:
+            self.output_allowed=bool(allowed)
+            if not self.output_allowed:self.events.clear()
         self.wake.set()
 
     def clear(self):
-        with self.lock:self.latest=None
+        with self.lock:self.latest=None;self.events.clear()
         self.wake.set()
 
     def submit(self,state,stamp):
         validate_bridge_state(state,stamp)
         # Serialization gives the sender a private snapshot, never a caller-owned dict.
-        with self.lock:self.latest=(json.loads(json.dumps(state,allow_nan=False)),stamp)
+        with self.lock:
+            snapshot=json.loads(json.dumps(state,allow_nan=False))
+            self.latest=(snapshot,stamp);self.events.offer(snapshot,stamp)
         self.wake.set()
 
     def _send(self):
@@ -172,6 +208,11 @@ class BridgeService:
                 if 0<=age<=candidate['trigger']['max_age_ms']:
                     state=candidate;stamp=captured_at
             status=self.status()
+            with self.lock:
+                if enabled and allowed and status['ready']:
+                    event=self.events.peek(time.time())
+                    if event is not None:state,stamp=event
+                else:self.events.clear()
             if not (enabled and allowed and status['ready']):
                 state=dict(state,trigger=dict(state['trigger'],armed=False,eligible=False))
             try:self.client.send(state,observed_at=stamp);self.error=None
@@ -401,7 +442,7 @@ class BridgeProcess:
 class AsyncBridgeServiceClient:
     """Detection never waits for a USB host or an HTTP timeout."""
     def __init__(self,config):
-        self.config=config;self.lock=threading.Lock();self.latest=None
+        self.config=config;self.lock=threading.Lock();self.latest=None;self.events=TriggerLatch()
         self.cached=unavailable_bridge('Bridge client starting');self.updated=0
         self.stop=threading.Event();self.wake=threading.Event()
         self.thread=threading.Thread(target=self._run,daemon=True);self.thread.start()
@@ -414,7 +455,9 @@ class AsyncBridgeServiceClient:
     def send(self,state,observed_at=None):
         stamp=time.time() if observed_at is None else observed_at
         validate_bridge_state(state,stamp)
-        with self.lock:self.latest=(json.loads(json.dumps(state,allow_nan=False)),stamp)
+        with self.lock:
+            snapshot=json.loads(json.dumps(state,allow_nan=False))
+            self.latest=(snapshot,stamp);self.events.offer(snapshot,stamp)
         self.wake.set();return self.status()
 
     def _run(self):
@@ -427,7 +470,9 @@ class AsyncBridgeServiceClient:
                         if client:client.close()
                         client=BridgeServiceClient(self.config);signature=current
                     self.wake.wait(.05);self.wake.clear()
-                    with self.lock:item=self.latest;self.latest=None
+                    with self.lock:
+                        item=self.events.pop(time.time()) or self.latest
+                        self.latest=None
                     value=client.send(item[0],item[1]) if item else client._request('GET','/status')
                     with self.lock:self.cached=value;self.updated=time.monotonic()
                 except (OSError,ValueError) as exc:
