@@ -454,7 +454,18 @@ class BridgeProcess:
                 try:self.process.wait(timeout=1)
                 except subprocess.TimeoutExpired:self.process.kill();self.process.wait(timeout=1)
         if self.log_stream:self.log_stream.close()
-        shutil.rmtree(self.folder,ignore_errors=True)
+        # Killing the PowerShell wrapper can precede its Python child's lease
+        # shutdown. Windows keeps inherited log handles locked until that exit.
+        deadline=time.monotonic()+3
+        while self.folder.exists():
+            try:
+                shutil.rmtree(self.folder)
+                break
+            except OSError:
+                if time.monotonic()>=deadline:
+                    print('Backend cleanup pending: '+str(self.folder),flush=True)
+                    break
+                time.sleep(.05)
 
 
 class AsyncBridgeServiceClient:
