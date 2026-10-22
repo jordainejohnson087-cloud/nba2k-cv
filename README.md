@@ -1,5 +1,13 @@
 # NBA 2K shot-meter CV pipeline
 
+## Restore the original manual output path (2026102204)
+
+The A/X diagnostic buttons now send the original `T2TEST` command even when the app's meter bridge is not ready, the API is unavailable, or there is no new Titan heartbeat/counter. The previous button incorrectly required the newer bridge's readiness before permitting a test of that bridge. This prevented using the actual standalone pair that had worked on the console.
+
+**Open original working test pair** exports and opens the existing `console_button_check.py` **and** `console_button_check.gpc`. It disconnects automatic meter output. Reuse the original test GPC slot and start **console_button_check** in Gtuner Computer Vision with Null Input, exactly as in the successful manual setup. Then press **Test A via PowerShell** in the app. No new meter GPC revision or pasted PowerShell command is needed for this original test. If the configured Gtuner Python executable exists, the sender uses it; otherwise it uses the app interpreter. The sender uses only Python's standard library.
+
+The standalone GPC has no app heartbeat or acknowledgment. Its console action is therefore checked through **Gtuner's `CONSOLE TEST: Titan issuing A` output and the Xbox screen**, not a fabricated app success indicator. The app says only that one request was sent when execution cannot be independently observed. The original pair is a button diagnostic; it does not implement AI-controlled rhythm/timing shots. Return to the meter GPC/worker afterward to test detection-driven output. Windows tests exercise the actual PowerShell sender against the original standalone receiver without an app API or heartbeat; physical Xbox and vendor compilation remain separate checks.
+
 ## Integrated PowerShell console-output tests (2026102203)
 
 On Windows, the app now launches the persistent model-free bridge host through **PowerShell → the app's Python environment**. Arguments are passed as quoted literals in a UTF-16LE encoded command; the app does not launch PowerShell once per video frame. The owner lease still shuts down the Python host on app exit. The GPU detector, capture and Gtuner USB host retain their existing independent roles.

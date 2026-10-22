@@ -127,9 +127,15 @@ def main():
                     assert app.gtuner_launched
                 # The console diagnostic is part of the real desktop, not a separate shell workflow.
                 assert app.console_test_status.get()=='No console test requested'
-                with patch.object(app.bridge_service,'status',return_value={'ready':False}):
+                (out/'console_button_check.py').write_text('test-only')
+                with patch.object(app.bridge_service,'status',return_value={'ready':False}),\
+                     patch.object(app,'_export_bridge',return_value=out),\
+                     patch.object(app_module.BridgeProcess,'powershell_command',return_value=['powershell.exe']),\
+                     patch.object(app_module.threading,'Thread') as manual_sender:
                     app._console_tap('A')
-                    assert 'bridge 3.2' in app.console_test_status.get()
+                    manual_sender.return_value.start.assert_called_once()
+                    assert app.console_test_busy
+                app.console_test_busy=False;app.console_test_at=-10
                 # Start Capture needs neither a model nor the selected CUDA environment.
                 capture_folder=out/'capture_only';capture_folder.mkdir()
                 app.model.set(str(out/'missing.pt'));app.environment.set('missing-python.exe')

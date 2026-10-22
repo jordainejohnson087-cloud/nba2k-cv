@@ -109,9 +109,32 @@ class ConsoleUiTests(unittest.TestCase):
                 launch.assert_called_once()
                 self.assertIn('timed out',ui.messages.get_nowait()[1][0])
 
-    def test_old_bridge_cannot_claim_an_unsupported_manual_test_was_sent(self):
-        with tempfile.TemporaryDirectory() as folder:
-            ui=self.ui(Path(folder));ui.bridge_service.status.return_value=dict(ready=True)
-            with patch('app.sys.platform','win32'),patch('app.subprocess.run') as launch:
-                Desktop._console_tap(ui,'A')
-            launch.assert_not_called();self.assertIn('bridge 3.2',ui.console_test_status.get())
+    def test_original_test_sends_without_bridge_readiness_or_a_heartbeat(self):
+        for service_present in (False,True):
+            with self.subTest(service=service_present),tempfile.TemporaryDirectory() as folder:
+                ui=self.ui(Path(folder))
+                if service_present:ui.bridge_service.status.return_value=dict(ready=False,stage='worker not receiving')
+                else:ui.bridge_service=None
+                with patch('app.sys.platform','win32'),patch.object(BridgeProcess,'powershell_command',return_value=['powershell.exe','test']),\
+                     patch('app.threading.Thread') as thread,patch('app.subprocess.run',return_value=SimpleNamespace(returncode=0,stdout='Sent one A request.',stderr='')) as launch:
+                    thread.return_value.start.side_effect=lambda:thread.call_args.kwargs['target']()
+                    Desktop._console_tap(ui,'A')
+                    launch.assert_called_once();ui._disarm_shots.assert_called_once()
+                    result=ui.messages.get_nowait()[1][0]
+                    self.assertIn('Original manual A request sent once',result)
+                    self.assertIn('Sending does not confirm delivery',result)
+
+    @unittest.skipUnless(sys.platform=='win32','Native Windows original manual path')
+    def test_powershell_sender_reaches_original_standalone_worker_without_app_api(self):
+        import importlib.util
+        spec=importlib.util.spec_from_file_location('original_console_worker',ROOT/'testing/console_button_check.py')
+        original=importlib.util.module_from_spec(spec);spec.loader.exec_module(original)
+        with patch.object(original,'PORT',0):worker=original.GCVWorker(1,1)
+        try:
+            command=BridgeProcess.powershell_command(sys.executable,[str(ROOT/'testing/console_button_check.py'),
+                '--tap','A','--port',str(worker.socket.getsockname()[1])])
+            result=subprocess.run(command,capture_output=True,text=True,timeout=10)
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertEqual(worker.process(None)[1],bytearray((84,49,1)))
+            self.assertEqual(worker.process(None)[1],bytearray((84,49,0)))
+        finally:worker.__del__()

@@ -512,6 +512,7 @@ class Desktop(tk.Tk):
         ttk.Label(device_card,textvariable=self.bridge_next_step,style='CardMuted.TLabel',wraplength=235).pack(anchor='w',pady=8)
         test_card=self._card(bridge_controls,'CONSOLE OUTPUT TEST')
         ttk.Label(test_card,text='PowerShell sends one A/X tap using the manual test path. No meter or model is needed. Use a menu or practice session.',style='CardMuted.TLabel',wraplength=235).pack(anchor='w')
+        ttk.Button(test_card,text='Open original working test pair',command=self._open_original_test).pack(fill='x',pady=4)
         ttk.Button(test_card,text='Test A via PowerShell',command=lambda:self._console_tap('A')).pack(fill='x',pady=4)
         ttk.Button(test_card,text='Test X via PowerShell',command=lambda:self._console_tap('X')).pack(fill='x',pady=4)
         self.console_test_status=tk.StringVar(value='No console test requested')
@@ -677,17 +678,21 @@ class Desktop(tk.Tk):
         # compatible with the first desktop updater's fixed filename allowlist.
         folder=PROJECT/'bridge'
         if hasattr(__import__('run_live'),'METER_GPC_SOURCE'):
-            from run_live import GTUNER_SOURCE, HEARTBEAT_SOURCE, METER_GPC_SOURCE, CONSOLE_TEST_SOURCE
+            from run_live import GTUNER_SOURCE, HEARTBEAT_SOURCE, METER_GPC_SOURCE, CONSOLE_TEST_SOURCE, CONSOLE_TEST_GPC_SOURCE
             folder.mkdir(exist_ok=True)
             (folder/'gtuner_meter.py').write_text(GTUNER_SOURCE,encoding='utf-8')
             (folder/'titan_heartbeat.gpc').write_text(HEARTBEAT_SOURCE,encoding='utf-8')
             (folder/'titan_meter.gpc').write_text(METER_GPC_SOURCE,encoding='utf-8')
             (folder/'console_button_check.py').write_text(CONSOLE_TEST_SOURCE,encoding='utf-8')
+            (folder/'console_button_check.gpc').write_text(CONSOLE_TEST_GPC_SOURCE,encoding='utf-8')
         if not (folder/'titan_meter.gpc').is_file() or not (folder/'gtuner_meter.py').is_file():
             raise FileNotFoundError('The matching bridge scripts are missing; install the latest app update.')
         diagnostic=folder/'console_button_check.py'
         if not diagnostic.is_file() and (PROJECT/'testing/console_button_check.py').is_file():
             diagnostic.write_text((PROJECT/'testing/console_button_check.py').read_text(encoding='utf-8'),encoding='utf-8')
+        original_gpc=folder/'console_button_check.gpc'
+        if not original_gpc.is_file() and (PROJECT/'testing/console_button_check.gpc').is_file():
+            original_gpc.write_text((PROJECT/'testing/console_button_check.gpc').read_text(encoding='utf-8'),encoding='utf-8')
         return folder
 
     def _open_bridge(self):
@@ -905,6 +910,19 @@ class Desktop(tk.Tk):
         self.after(12000,lambda:self._bridge_prepare_timeout(generation))
         threading.Thread(target=work,daemon=True).start()
 
+    def _open_original_test(self):
+        # Use the actual standalone pair, not the meter GPC's newer test branch.
+        self._disconnect_bridge()
+        try:
+            folder=self._export_bridge()
+            if not (folder/'console_button_check.gpc').is_file():raise OSError('Original test GPC is missing')
+            found=discover_gtuner(self.gtuner_path.get())
+            if found:
+                subprocess.Popen([str(found),str(folder/'console_button_check.gpc'),str(folder/'console_button_check.py')],cwd=Path(found).parent)
+            else:self._open_path(folder)
+            self.console_test_status.set('Original files opened. Select the original test GPC slot and run console_button_check in Gtuner CV with Null Input, then Test A. The app has not programmed or selected a slot.')
+        except (OSError,ValueError) as exc:self.console_test_status.set(str(exc))
+
     def _console_tap(self,button):
         if button not in ('A','X') or getattr(self,'console_test_busy',False):return
         if sys.platform!='win32':
@@ -913,39 +931,36 @@ class Desktop(tk.Tk):
             self.console_test_status.set('Wait one second between console tests.');return
         service=self.bridge_service
         status=service.status() if service else {}
-        if not status.get('ready') or type(status.get('device_test_count')) is not int:
-            self.console_test_status.set('Connect bridge 3.2 and restart the updated gtuner_meter worker first.');return
-        if not status.get('test_available'):
-            self.console_test_status.set('Test port 26741 unavailable. Stop the separate console_button_check worker, then restart gtuner_meter.');return
+        # Diagnostic sending must work with the original standalone receiver,
+        # which has no app API, version handshake, heartbeat or execution counter.
         self._disarm_shots()
         try:
             script=self._export_bridge()/'console_button_check.py'
             if not script.is_file():raise OSError('Matching console test sender is missing')
-            command=BridgeProcess.powershell_command(sys.executable,[str(script),'--tap',button])
+            configured=getattr(self,'gtuner_python',None)
+            sender=configured.get() if configured else ''
+            if not sender or not Path(sender).is_file():sender=sys.executable
+            command=BridgeProcess.powershell_command(sender,[str(script),'--tap',button])
         except OSError as exc:
             self.console_test_status.set(str(exc));return
         self.console_test_busy=True;self.console_test_at=time.monotonic()
         self.console_test_status.set('PowerShell: sending one '+button+' tap...')
-        baseline=status['device_test_count']
+        baseline=status.get('device_test_count')
         def send():
             result='';log=''
             try:
-                deadline=time.monotonic()+2
-                while service.status().get('output_allowed',True):
-                    if time.monotonic()>=deadline:raise OSError('Could not confirm shots disarmed; test was not sent')
-                    time.sleep(.02)
                 outcome=subprocess.run(command,capture_output=True,text=True,timeout=8,
                     creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
                 log=outcome.stdout+outcome.stderr
                 if outcome.returncode:raise OSError('PowerShell sender failed: '+log.strip())
                 deadline=time.monotonic()+2
-                while time.monotonic()<deadline:
+                while service is not None and type(baseline) is int and time.monotonic()<deadline:
                     current=service.status()
                     if (current.get('ready') and type(current.get('device_test_count')) is int
                         and current['device_test_count']!=baseline and current.get('device_test_button')=={'A':1,'X':2}[button]):
                         result='Titan reports issuing '+button+' (100 ms). Check the Xbox screen; Xbox receipt is unverified.';break
                     time.sleep(.025)
-                if not result:result='PowerShell sent '+button+', but Titan did not acknowledge executing it. Check the bridge 3.2 script and GCV worker. No retry was sent.'
+                if not result:result='Original manual '+button+' request sent once. No execution acknowledgment was observed; the standalone test does not provide one. Check Gtuner for CONSOLE TEST: Titan issuing '+button+' and watch Xbox. Sending does not confirm delivery.'
             except (OSError,subprocess.SubprocessError) as exc:result=str(exc)
             self.messages.put(('console_test_done',(result,log)))
         threading.Thread(target=send,daemon=True).start()
