@@ -509,10 +509,14 @@ class Desktop(tk.Tk):
         ttk.Label(device_card,textvariable=self.bridge_status,style='CardMuted.TLabel',wraplength=235).pack(anchor='w',pady=8)
         ttk.Label(device_card,textvariable=self.bridge_next_step,style='CardMuted.TLabel',wraplength=235).pack(anchor='w',pady=8)
         test_card=self._card(bridge_controls,'CONSOLE OUTPUT TEST')
-        ttk.Label(test_card,text='PowerShell sends one A/X tap using the manual test path. No meter or model is needed. Use a menu or practice session.',style='CardMuted.TLabel',wraplength=235).pack(anchor='w')
+        ttk.Label(test_card,text='PowerShell can hold X, then release it after the selected time. Use the updated test pair 1.1 or meter bridge 3.5 in practice.',style='CardMuted.TLabel',wraplength=235).pack(anchor='w')
         ttk.Button(test_card,text='Open original working test pair',command=self._open_original_test).pack(fill='x',pady=4)
         ttk.Button(test_card,text='Test A via PowerShell',command=lambda:self._console_tap('A')).pack(fill='x',pady=4)
-        ttk.Button(test_card,text='Release Held X — test',command=lambda:self._console_tap('RELEASE_X')).pack(fill='x',pady=4)
+        self.console_hold_ms=tk.StringVar(value='750')
+        ttk.Label(test_card,text='X hold duration (ms)',style='CardMuted.TLabel').pack(anchor='w')
+        ttk.Spinbox(test_card,from_=100,to=2000,increment=50,textvariable=self.console_hold_ms).pack(fill='x',pady=4)
+        ttk.Button(test_card,text='Hold X → Release via PowerShell',command=lambda:self._console_tap('HOLD_X')).pack(fill='x',pady=4)
+        ttk.Button(test_card,text='Release X via PowerShell',command=lambda:self._console_tap('RELEASE_X')).pack(fill='x',pady=4)
         ttk.Button(test_card,text='Test X via PowerShell',command=lambda:self._console_tap('X')).pack(fill='x',pady=4)
         self.console_test_status=tk.StringVar(value='No console test requested')
         ttk.Label(test_card,textvariable=self.console_test_status,style='CardMuted.TLabel',wraplength=235).pack(anchor='w',pady=4)
@@ -919,15 +923,20 @@ class Desktop(tk.Tk):
         except (OSError,ValueError) as exc:self.console_test_status.set(str(exc))
 
     def _console_tap(self,button):
-        if button not in ('A','X','RELEASE_X') or getattr(self,'console_test_busy',False):return
+        if button not in ('A','X','RELEASE_X','HOLD_X') or getattr(self,'console_test_busy',False):return
         if sys.platform!='win32':
             self.console_test_status.set('PowerShell console tests require Windows.');return
         if time.monotonic()-getattr(self,'console_test_at',-10)<1:
             self.console_test_status.set('Wait one second between console tests.');return
         service=self.bridge_service
         status=service.status() if service else {}
-        if button=='RELEASE_X' and (not status.get('ready') or type(status.get('device_gate')) is not int or not (status['device_gate'] & 256)):
-            self.console_test_status.set('Connect the X-only bridge 3.4 and gtuner_meter. Hold X, then press Release Held X.');return
+        hold_ms=750
+        if button=='HOLD_X':
+            try:
+                hold_ms=int(self.console_hold_ms.get())
+                if not 100<=hold_ms<=2000:raise ValueError()
+            except (ValueError,TypeError):
+                self.console_test_status.set('X hold duration must be 100–2000 ms.');return
         # Diagnostic sending must work with the original standalone receiver,
         # which has no app API, version handshake, heartbeat or execution counter.
         self._disarm_shots()
@@ -940,11 +949,12 @@ class Desktop(tk.Tk):
             configured=getattr(self,'gtuner_python',None)
             sender=configured.get() if configured else ''
             if not sender or not Path(sender).is_file():sender=sys.executable
-            command=BridgeProcess.powershell_command(sender,[str(script),'--tap',button])
+            arguments=['--hold-x-ms',str(hold_ms)] if button=='HOLD_X' else ['--tap',button]
+            command=BridgeProcess.powershell_command(sender,[str(script),*arguments])
         except OSError as exc:
             self.console_test_status.set(str(exc));return
         self.console_test_busy=True;self.console_test_at=time.monotonic()
-        self.console_test_status.set('PowerShell: sending one '+button+' tap...')
+        self.console_test_status.set('PowerShell: holding X for '+str(hold_ms)+' ms, then releasing...' if button=='HOLD_X' else 'PowerShell: sending '+button+'...')
         baseline=status.get('device_test_count')
         def send():
             result='';log=''
@@ -957,10 +967,10 @@ class Desktop(tk.Tk):
                 while service is not None and type(baseline) is int and time.monotonic()<deadline:
                     current=service.status()
                     if (current.get('ready') and type(current.get('device_test_count')) is int
-                        and current['device_test_count']!=baseline and current.get('device_test_button')=={'A':1,'X':2,'RELEASE_X':3}[button]):
-                        result=('Titan reports releasing held X until physical release.' if button=='RELEASE_X' else 'Titan reports issuing '+button+' (100 ms).')+' Check the Xbox screen; Xbox receipt is unverified.';break
+                        and current['device_test_count']!=baseline and current.get('device_test_button')=={'A':1,'X':2,'RELEASE_X':3,'HOLD_X':3}[button]):
+                        result=('Titan reports executing X release.' if button in ('RELEASE_X','HOLD_X') else 'Titan reports issuing '+button+' (100 ms).')+' Check the Xbox screen; Xbox receipt is unverified.';break
                     time.sleep(.025)
-                if not result and button=='RELEASE_X':result='No held-X release confirmed. Keep physical X held while clicking the test, then check X input in the Titan status. No retry was sent.'
+                if not result and button in ('RELEASE_X','HOLD_X'):result='PowerShell X '+('hold/release' if button=='HOLD_X' else 'release')+' request sent. No Titan acknowledgment observed; the standalone test has none. Check Gtuner for holding/releasing X and watch Xbox. Install test pair 1.1 or meter bridge 3.5. No retry was sent.'
                 if not result:result='Original manual '+button+' request sent once. No execution acknowledgment was observed; the standalone test does not provide one. Check Gtuner for CONSOLE TEST: Titan issuing '+button+' and watch Xbox. Sending does not confirm delivery.'
             except (OSError,subprocess.SubprocessError) as exc:result=str(exc)
             self.messages.put(('console_test_done',(result,log)))

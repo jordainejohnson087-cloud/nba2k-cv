@@ -55,6 +55,43 @@ class ManualPathTests(unittest.TestCase):
                     self.assertNotEqual(worker.process(None)[1][:2],bytes((84,49)))
             finally:worker.__del__()
 
+    def test_real_timed_hold_sender_reaches_both_workers(self):
+        import importlib.util
+        spec=importlib.util.spec_from_file_location('hold_console_worker',ROOT/'testing/console_button_check.py')
+        original=importlib.util.module_from_spec(spec);spec.loader.exec_module(original)
+        for integrated in (False,True):
+            with self.subTest(integrated=integrated),patch.object(gcv,'PORT',0),patch.object(gcv,'TEST_PORT',0),patch.object(original,'PORT',0):
+                worker=gcv.GCVWorker(1,1) if integrated else original.GCVWorker(1,1)
+                try:
+                    port=(worker.test_socket if integrated else worker.socket).getsockname()[1]
+                    args=[str(ROOT/'testing/console_button_check.py'),'--hold-x-ms','150','--port',str(port)]
+                    command=BridgeProcess.powershell_command(sys.executable,args) if sys.platform=='win32' else [sys.executable,*args]
+                    process=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+                    commands=[];deadline=time.monotonic()+10
+                    with patch.dict(sys.modules,gtuner=SimpleNamespace(gpc_string=lambda:None)):
+                        while time.monotonic()<deadline:
+                            payload=worker.process(None)[1]
+                            if payload[:2]==bytearray((84,49)) and payload[2]:commands.append((payload[2],time.monotonic()))
+                            if process.poll() is not None and len(commands)>=2:break
+                            time.sleep(.005)
+                    if process.poll() is None:process.kill()
+                    stdout,stderr=process.communicate(timeout=2)
+                    self.assertEqual(process.returncode,0,stderr)
+                    self.assertEqual([c[0] for c in commands],[4,3])
+                    self.assertGreater(commands[1][1]-commands[0][1],.08)
+                finally:worker.__del__()
+
+    def test_release_bypasses_neutral_cooldown_and_armed_state(self):
+        with patch.object(gcv,'PORT',0),patch.object(gcv,'TEST_PORT',0):worker=gcv.GCVWorker(1,1)
+        try:
+            worker.packet=fixtures.ProtocolTests().packet();worker.last_packet=time.monotonic()
+            worker.last_test=time.monotonic();worker.test_reset=True
+            with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as sender:
+                sender.sendto(f'T2TEST:RELEASE_X:{time.time()}'.encode(),worker.test_socket.getsockname())
+            with patch.dict(sys.modules,gtuner=SimpleNamespace(gpc_string=lambda:None)):
+                self.assertEqual(worker.process(None)[1],bytearray((84,49,3)))
+        finally:worker.__del__()
+
     def test_powershell_command_quotes_paths_and_arguments_as_literals(self):
         with patch('bridge_service.shutil.which',return_value='powershell.exe'):
             command=BridgeProcess.powershell_command('python.exe',["sender's $(anything).py",'--tap','A'])
@@ -80,7 +117,7 @@ class ConsoleUiTests(unittest.TestCase):
         script=folder/'console_button_check.py';script.write_text('test fixture')
         status=dict(ready=True,test_available=True,device_test_count=0,output_allowed=False)
         service=Mock();service.status.return_value=status
-        return SimpleNamespace(bridge_service=service,console_test_status=Variable(''),
+        return SimpleNamespace(bridge_service=service,console_test_status=Variable(''),console_hold_ms=Variable('750'),
             _disarm_shots=Mock(),_disconnect_bridge=Mock(),_export_bridge=Mock(return_value=folder),messages=queue.Queue())
 
     def test_app_disarms_and_launches_one_powershell_request(self):
@@ -112,16 +149,27 @@ class ConsoleUiTests(unittest.TestCase):
                 Desktop._console_tap(ui,'RELEASE_X')
                 ui._disarm_shots.assert_called_once();launch.assert_called_once()
                 self.assertEqual(command.call_args.args[1][-2:],['--tap','RELEASE_X'])
-                self.assertIn('releasing held X until physical release',ui.messages.get_nowait()[1][0])
+                self.assertIn('executing X release',ui.messages.get_nowait()[1][0])
 
-    def test_held_x_release_requires_new_meter_script_capability(self):
-        for gate in (None,0,16):
-            with self.subTest(gate=gate),tempfile.TemporaryDirectory() as folder:
-                ui=self.ui(Path(folder));ui.bridge_service.status.return_value.update(device_gate=gate)
-                with patch('app.sys.platform','win32'),patch('app.subprocess.run') as launch:
-                    Desktop._console_tap(ui,'RELEASE_X')
-                    launch.assert_not_called();ui._disarm_shots.assert_not_called()
-                    self.assertIn('bridge 3.4',ui.console_test_status.get())
+    def test_held_x_release_uses_original_path_without_meter_capability(self):
+        with tempfile.TemporaryDirectory() as folder:
+            ui=self.ui(Path(folder));ui.bridge_service=None
+            with patch('app.sys.platform','win32'),patch.object(BridgeProcess,'powershell_command',return_value=['powershell.exe','test']) as command,\
+                 patch('app.threading.Thread') as thread,patch('app.subprocess.run',return_value=SimpleNamespace(returncode=0,stdout='',stderr='')) as launch:
+                thread.return_value.start.side_effect=lambda:thread.call_args.kwargs['target']()
+                Desktop._console_tap(ui,'RELEASE_X')
+                launch.assert_called_once();ui._disarm_shots.assert_called_once()
+                self.assertEqual(command.call_args.args[1][-2:],['--tap','RELEASE_X'])
+
+    def test_hold_button_sends_duration_instead_of_tap(self):
+        with tempfile.TemporaryDirectory() as folder:
+            ui=self.ui(Path(folder));ui.bridge_service=None
+            with patch('app.sys.platform','win32'),patch.object(BridgeProcess,'powershell_command',return_value=['powershell.exe','test']) as command,\
+                 patch('app.threading.Thread') as thread,patch('app.subprocess.run',return_value=SimpleNamespace(returncode=0,stdout='',stderr='')):
+                thread.return_value.start.side_effect=lambda:thread.call_args.kwargs['target']()
+                Desktop._console_tap(ui,'HOLD_X')
+                self.assertEqual(command.call_args.args[1][-2:],['--hold-x-ms','750'])
+                ui._disarm_shots.assert_called_once()
 
     def test_uncertain_sender_timeout_is_not_retried(self):
         with tempfile.TemporaryDirectory() as folder:

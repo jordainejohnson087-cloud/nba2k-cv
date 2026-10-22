@@ -1,5 +1,18 @@
 # NBA 2K shot-meter CV pipeline
 
+## PowerShell X hold and release (2026102207)
+
+The original standalone receiver accepted only A/X taps, so a RELEASE_X command sent to it was ignored. Both the standalone **test pair 1.1** and **meter bridge 3.5** now support explicit HOLD_X and RELEASE_X commands through the existing loopback PowerShell sender. The app adds **Hold X → Release via PowerShell** with a 100–2000 ms duration (default 750 ms), plus **Release X via PowerShell** for a physical held button. A hold test needs no physical X press, model or green detection. It disarms AI output before testing.
+
+The sender sends HOLD_X once and RELEASE_X in a finally block after the duration. Titan maintains X output at 100 across GCV callbacks until release, with a device-side 2500 ms maximum if the sender/worker stops. Release takes priority over the test cooldown, neutral callback and armed flag. It clears the synthetic hold and sets X output to zero; if physical X remains held, output stays zero until physical release. The working 100 ms A/X tap commands remain available. No rhythm inputs are produced.
+
+After the app update, export and install the updated matching GPC **and** restart its Python GCV worker: `console_button_check.gpc` 1.1 + `console_button_check.py` for the proven standalone path, or `titan_meter.gpc` 3.5 + `gtuner_meter.py` for the integrated bridge. Old stored Titan scripts do not acquire new commands from an app update alone. Use Null Input in Gtuner and keep the app as the capture-card owner.
+
+In practice, choose 750 ms and click Hold X → Release via PowerShell. Watch Gtuner X **output** stay at 100, then go to 0, and check Xbox starts/releases the shot. The standalone GPC logs both actions; the app cannot independently acknowledge it. Meter bridge acknowledgments report device execution only, not Xbox receipt. Once this works, use physical X hold with armed AI timing and inspect the green event separately.
+
+Tests exercise both real UDP receivers with the timed sender, native PowerShell on Windows, both GPC main bodies in a host shim, physical hold suppression, lost-release timeout, and release priority. These checks do not replace Gtuner compilation or a physical Xbox test.
+
+
 ## X-only Xbox jumpshots (2026102206)
 
 The current app uses **Timing: hold Xbox X, then release X on a fresh observed green event**. Rhythm is deferred. Bridge **3.4** never rewrites the right stick, RT or movement. After an accepted release, X output remains zero until the physical button is released; disarming or a link timeout cannot turn the held button back into a second press. Release X before arming.

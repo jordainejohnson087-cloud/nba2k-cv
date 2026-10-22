@@ -1,10 +1,13 @@
-#pragma METAINFO("Manual Console Button Check", 1, 0, "NBA2K CV")
+#pragma METAINFO("Manual Console Button Check", 1, 1, "NBA2K CV")
 // Match with console_button_check.py only. No action on script startup.
-// Each fresh rising-edge command taps A or X once for 100 ms.
+// A/X taps, explicit X hold, explicit X release. No output on startup.
 uint8 magic_a;
 uint8 magic_b;
 uint8 command;
 uint8 previous;
+bool hold_x;
+bool release_x;
+uint16 hold_age;
 
 main {
     if(gcv_ready()) {
@@ -19,12 +22,32 @@ main {
                 } else if(command == 2) {
                     printf("CONSOLE TEST: Titan issuing X for 100 ms");
                     combo_run(TapX);
+                } else if(command == 3) {
+                    hold_x = FALSE;
+                    release_x = TRUE;
+                    printf("CONSOLE TEST: Titan releasing X");
+                } else if(command == 4) {
+                    hold_x = TRUE;
+                    hold_age = 0;
+                    release_x = FALSE;
+                    printf("CONSOLE TEST: Titan holding X (2500 ms maximum)");
                 }
             }
             previous = command;
         } else {
             previous = 0;
         }
+    }
+    if(hold_x) {
+        hold_age += elapsed_time();
+        if(hold_age >= 2500) {
+            hold_x = FALSE;
+            release_x = TRUE;
+        } else set_val(BUTTON_17, 100);
+    }
+    if(release_x) {
+        set_val(BUTTON_17, 0);
+        if(!get_actual(BUTTON_17)) release_x = FALSE;
     }
 }
 

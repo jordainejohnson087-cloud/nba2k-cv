@@ -68,7 +68,7 @@ int main(){
   bytes[7]=0;bytes[8]=45;bytes[9]=0;bytes[10]=100;
   for(int n=0;n<4;++n){bytes[11+n]=(event>>(24-8*n))&255;bytes[19+n]=(seq>>(24-8*n))&255;}
   bytes[23]=0;bytes[24]=lifetime;bytes[25]=mode;
-  if(legacy){bytes[0]=84;bytes[1]=49;bytes[2]=legacy==3?0:legacy==4?3:legacy;}
+  if(legacy){bytes[0]=84;bytes[1]=49;bytes[2]=legacy==3?0:legacy==4?3:legacy==5?4:legacy;}
   test_tap=0;
   for(int n=0;n<32;++n){actual[n]=0;output[n]=0;}
   actual[17]=x;actual[20]=ry;actual[6]=r3;actual[4]=70;actual[5]=40;
@@ -78,6 +78,7 @@ int main(){
  }
 }
 '''
+        cls.prelude=prelude;cls.harness=harness
         cls.cpp_source=prelude+source+harness
         cls.compiler=compiler
         cpp=root/'mechanics.cpp';cpp.write_text(cls.cpp_source)
@@ -143,9 +144,38 @@ int main(){
         self.assertTrue(out[2][10] & 512)  # Raw X is held even though output is zero.
         self.assertTrue(out[2][10] & 256)  # Dedicated release capability.
 
-    def test_manual_release_without_physical_hold_is_not_acknowledged(self):
+    def test_manual_release_without_physical_hold_is_acknowledged(self):
         out=self.run_frames([{},dict(legacy=4),dict(legacy=3)])
-        self.assertEqual(out[-1][7],0)
+        self.assertEqual(out[-1][7:9],[1,3])
+
+    def test_powershell_hold_persists_across_callbacks_then_releases(self):
+        out=self.run_frames([dict(legacy=5),dict(legacy=3,dt=200),dict(arm=0,dt=200),
+            dict(legacy=4),dict(arm=0)])
+        self.assertEqual([r[0] for r in out],[100,100,100,0,0])
+        self.assertEqual(out[0][7:9],[1,4]);self.assertEqual(out[3][7:9],[2,3])
+
+    def test_lost_manual_release_times_out_on_device_without_cv(self):
+        out=self.run_frames([dict(legacy=5),dict(deliver=0,dt=2000),dict(deliver=0,dt=500),dict(deliver=0)])
+        self.assertEqual([r[0] for r in out],[100,100,0,0])
+
+    def test_original_standalone_gpc_hold_release_and_timeout(self):
+        source=(Path(__file__).resolve().parents[1]/'testing/console_button_check.gpc').read_text()
+        source=re.sub(r'^#.*$', '', source, flags=re.M).replace('main {','void tick() {')
+        source=source.replace('combo_run(TapA);','test_tap=16;').replace('combo_run(TapX);','test_tap=17;')
+        source=re.sub(r'combo (?:TapA|TapX) \{.*?\n\}', '', source, flags=re.S)
+        source=re.sub(r'printf\([^;]+;', '', source)
+        root=Path(self.folder.name);cpp=root/'standalone.cpp';binary=root/'standalone'
+        cpp.write_text(self.prelude+'int phase=0,fired_event=0,blocked=0,test_counter=0,test_button=0,gate_word=0;\n'+source+self.harness)
+        result=subprocess.run([self.compiler,'-std=c++11',str(cpp),'-o',str(binary)],capture_output=True,text=True,timeout=30)
+        self.assertEqual(result.returncode,0,result.stderr)
+        from unittest.mock import patch
+        with patch.object(self,'binary',binary):
+            out=self.run_frames([dict(legacy=5),dict(legacy=3,dt=500),dict(legacy=4),
+                dict(x=100,legacy=3),dict(x=0,legacy=3),dict(x=100,legacy=3)])
+            # A released physical button can be pressed again normally.
+            self.assertEqual([r[0] for r in out],[100,100,0,100,0,100])
+            out=self.run_frames([dict(legacy=5),dict(deliver=0,dt=2000),dict(deliver=0,dt=500)])
+            self.assertEqual([r[0] for r in out],[100,100,0])
 
     def test_rhythm_mode_is_rejected_and_right_stick_never_changes(self):
         out=self.run_frames([dict(mode=0,ry=100),dict(mode=0,x=100,ry=100,seen=1,green=1,event=1)])

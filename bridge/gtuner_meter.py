@@ -142,13 +142,17 @@ class GCVWorker:
                     prefix,button,stamp=data.decode('ascii').split(':')
                     age=time.time()-float(stamp)
                     armed=self.packet.get('trigger',{}).get('armed',False) and now-self.last_packet<STALE_SECONDS
-                    if (not neutral and not command and not armed and now-self.last_test>=.8
-                        and prefix=='T2TEST' and button in ('A','X','RELEASE_X') and 0<=age<=.5):
-                        command={'A':1,'X':2,'RELEASE_X':3}[button]
+                    if prefix=='T2TEST' and 0<=age<=.5:
+                        # A release must never be dropped by tap cooldown, neutral
+                        # callback or a concurrent arm transition.
+                        if button=='RELEASE_X':command=3
+                        elif (not neutral and not command and not armed and now-self.last_test>=.8
+                              and button in ('A','X','HOLD_X')):
+                            command={'A':1,'X':2,'HOLD_X':4}[button]
                 except (ValueError,UnicodeError):pass
         if command:
             self.last_test=now;self.test_reset=True
-            print('CONSOLE TEST: forwarding one '+{1:'A tap',2:'X tap',3:'held X release'}[command]+' to Titan; Xbox receipt unverified.',flush=True)
+            print('CONSOLE TEST: forwarding one '+{1:'A tap',2:'X tap',3:'X release',4:'X hold'}[command]+' to Titan; Xbox receipt unverified.',flush=True)
             return frame,bytearray((84,49,command))
         if neutral:return frame,bytearray((84,49,0))
         return frame, encode(self.packet, now-self.last_packet < STALE_SECONDS and

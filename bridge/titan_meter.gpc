@@ -1,9 +1,9 @@
-#pragma METAINFO("NBA2K CV Meter Bridge", 3, 4, "NBA2K CV")
+#pragma METAINFO("NBA2K CV Meter Bridge", 3, 5, "NBA2K CV")
 #include <PS4.gph>
 // X jumpshots only: physical X hold, then one observed-green X release.
 // Rhythm is deferred. No right-stick axes are rewritten.
 // RT, movement and unrelated buttons are never rewritten.
-// Release X before arming. Manual release tests require physical X held.
+// Release X before arming. PowerShell can test a timed X hold and release.
 uint32 heartbeat_counter;
 uint32 packet_seq;
 uint32 incoming_seq;
@@ -35,6 +35,8 @@ uint8 test_button;
 uint32 test_counter;
 bool manual_packet;
 bool release_x;
+bool manual_hold_x;
+uint16 manual_hold_age;
 uint8 gate_reason;
 uint16 gate_word;
 
@@ -60,10 +62,17 @@ main {
                 test_counter++;
                 test_button = 2;
                 combo_run(ConsoleTapX);
-            } else if(test_command == 3 && get_actual(BUTTON_17) > 0.0) {
+            } else if(test_command == 3) {
                 test_counter++;
                 test_button = 3;
+                manual_hold_x = FALSE;
                 release_x = TRUE;
+            } else if(test_command == 4) {
+                test_counter++;
+                test_button = 4;
+                manual_hold_x = TRUE;
+                manual_hold_age = 0;
+                release_x = FALSE;
             }
         }
         test_previous = test_command;
@@ -133,11 +142,19 @@ main {
             }
         }
     }
-    // One shared output operation for manual release tests and AI timing.
-    // Keep X released until physical release, so a held button cannot re-press.
+    // Explicit manual hold lasts until RELEASE_X, with a device-side limit
+    // if PowerShell, GCV or the app stops before the release is delivered.
+    if(manual_hold_x) {
+        manual_hold_age += elapsed_time();
+        if(manual_hold_age >= 2500) {
+            manual_hold_x = FALSE;
+            release_x = TRUE;
+        } else set_val(BUTTON_17, 100);
+    }
+    // Shared release operation: synthetic holds and physical X are both released.
     if(release_x) {
-        if(get_actual(BUTTON_17) > 0.0) set_val(BUTTON_17, 0);
-        else release_x = FALSE;
+        set_val(BUTTON_17, 0);
+        if(!get_actual(BUTTON_17)) release_x = FALSE;
     }
     gate_reason = 0;
     if(!armed) gate_reason = 1;
@@ -147,7 +164,7 @@ main {
     else if(release_x || fired) gate_reason = 8;
     else if(!green) gate_reason = 6;
     else if(packet_age > ttl) gate_reason = 7;
-    gate_word = gate_reason + 16 + 256; // Timing + manual-X-release capability.
+    gate_word = gate_reason + 16 + 256 + 1024; // Timing + release + hold capabilities.
     if(get_actual(BUTTON_17) > 0.0) gate_word += 512;
 }
 
