@@ -50,6 +50,7 @@ def validate_bridge_state(state,stamp):
     for key,low,high in [('event_id',0,0xffffffff),('delay_ms',0,250),('hold_ms',10,500),('max_age_ms',25,250)]:
         if type(trigger.get(key)) is not int or not low<=trigger[key]<=high:raise ValueError('Invalid trigger timing')
     if trigger.get('direction') not in ('up','down'):raise ValueError('Invalid direction')
+    if trigger.get('shot_mode','rhythm') not in ('rhythm','timing'):raise ValueError('Invalid shot mode')
     shot=state.get('shot_id')
     if shot is not None and (type(shot) is not int or not 0<=shot<=0xffffffff):raise ValueError('Invalid shot')
 
@@ -125,8 +126,10 @@ class BridgeService:
         echo=type(sequence) is int and self.first_sequence<=sequence<=self.client.seq
         slot=value.get('active_slot')
         slot_valid=type(slot) is int and 1<=slot<=9
-        ready=value['hardware']=='heartbeat verified' and echo and slot_valid and matching
+        compatible=value.get('worker_protocol')==3 and value.get('device_protocol')==3
+        ready=compatible and value['hardware']=='heartbeat verified' and echo and slot_valid and matching
         if value['receiver']!='receiving':stage='Gtuner CV worker not receiving'
+        elif not compatible:stage='Bridge version mismatch; restart the updated GCV worker and install Titan bridge 3.0'
         elif value['hardware']!='heartbeat verified' or not echo:stage='Titan script payload echo missing'
         elif not slot_valid:stage='Titan slot echo missing; install the current meter GPC'
         elif not matching:stage='Selected Titan slot does not match'

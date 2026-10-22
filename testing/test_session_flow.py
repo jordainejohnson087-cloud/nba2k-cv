@@ -22,7 +22,7 @@ class SessionTests(unittest.TestCase):
             trigger_armed=Variable(False),bridge_enabled=Variable(True),status=Variable(''),session_status=Variable(''),
             bridge_service=Mock(),_save=Mock(),_capture_ready=Mock(return_value=True),after=Mock(),_live=Mock())
         ui.bridge_service.status.return_value=dict(ready=True)
-        for name in ('_session_tick','_detector_status','_arming_blocker','_apply_green','_arm_shots','_disarm_shots'):
+        for name in ('_session_tick','_detector_status','_arming_blocker','_apply_green','_arm_shots','_disarm_shots','_shot_mode_changed'):
             setattr(ui,name,MethodType(getattr(Desktop,name),ui))
         ui._green_values=lambda:green_config(dict(armed=ui.trigger_armed.get()))
         (out/'live_status.json').write_text(json.dumps(dict(timestamp=time.time(),status='absent',device='0')))
@@ -55,6 +55,15 @@ class SessionTests(unittest.TestCase):
                 ui._arm_shots()
                 self.assertFalse(ui.trigger_armed.get())
                 ui.bridge_service.allow_output.assert_called_with(False)
+
+    def test_selecting_a_different_mechanic_disarms_and_preserves_preview(self):
+        with tempfile.TemporaryDirectory() as folder:
+            out=Path(folder);ui=self.ui(out);ui.trigger_armed.set(True)
+            ui._shot_mode_changed()
+            self.assertFalse(ui.trigger_armed.get())
+            ui.bridge_service.allow_output.assert_called_with(False)
+            self.assertTrue(ui.capture_active);self.assertTrue(ui.live_active)
+            self.assertIn('release X and RS',ui.session_status.get())
 
     def test_settings_write_failure_disarms_host(self):
         with tempfile.TemporaryDirectory() as folder:

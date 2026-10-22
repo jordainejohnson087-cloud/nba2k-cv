@@ -150,7 +150,15 @@ def main():
                     app.capture_active=True;app._session_tick();engine.assert_called_once()
                     assert 'Session ready' in app.session_status.get() and not app.trigger_armed.get()
                     app._arm_shots();assert app.trigger_armed.get()
+                    app.green_vars['shot_mode'].set('timing')
+                    app.shot_mode_menu.event_generate('<<ComboboxSelected>>')
+                    assert not app.trigger_armed.get()
+                    assert app._green_values()['shot_mode']=='timing'
+                    app._arm_shots();assert app.trigger_armed.get()
                     app._disarm_shots();assert not app.trigger_armed.get()
+                    app.green_vars['shot_mode'].set('rhythm')
+                    app.shot_mode_menu.event_generate('<<ComboboxSelected>>')
+                    assert not app.trigger_armed.get()
                     assert app.capture_active and app.live_active
                 app.capture_active=False;app.live_active=False;app.session_requested=False
                 # Remove the simulated capture's completion before the next independent run.

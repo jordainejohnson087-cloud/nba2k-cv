@@ -8,7 +8,7 @@ import time
 
 DEFAULT_GREEN = dict(armed=False, hue_low=35, hue_high=90, saturation_min=90,
     value_min=70, row_coverage=.12, min_confidence=.5, confirmations=1,
-    max_age_ms=100, rearm_ms=500, delay_ms=45, hold_ms=100, direction='up')
+    max_age_ms=100, rearm_ms=500, delay_ms=45, hold_ms=100, direction='up', shot_mode='rhythm')
 
 
 def green_config(overrides=None):
@@ -29,6 +29,7 @@ def green_config(overrides=None):
             raise ValueError('Invalid '+key)
     if result['hue_low']>result['hue_high']:raise ValueError('Green hue low exceeds high')
     if result['direction'] not in ('up','down'):raise ValueError('Invalid flick direction')
+    if result['shot_mode'] not in ('rhythm','timing'):raise ValueError('Invalid shot mode')
     return result
 
 
@@ -73,7 +74,7 @@ class GreenGate:
 
     def configure(self, config):
         updated=green_config(config)
-        if updated['armed']!=self.config['armed']:
+        if any(updated[key]!=self.config[key] for key in ('armed','shot_mode','direction')):
             self.latched=False;self.approaching=False;self.consecutive=0
         self.config=updated
 
@@ -96,7 +97,7 @@ class GreenGate:
         if candidate:
             self.event=(self.event+1)&0xffffffff or 1
             self.latched=True
-        return dict(version=2,armed=cfg['armed'],green=inside,eligible=bool(inside and self.latched),
+        return dict(version=3,shot_mode=cfg['shot_mode'],armed=cfg['armed'],green=inside,eligible=bool(inside and self.latched),
             event_id=self.event,candidate=bool(candidate),valid=bool(valid),
             delay_ms=cfg['delay_ms'],hold_ms=cfg['hold_ms'],direction=cfg['direction'],
             max_age_ms=cfg['max_age_ms'])

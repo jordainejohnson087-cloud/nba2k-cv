@@ -41,7 +41,7 @@ class BridgeApiTests(unittest.TestCase):
                 except socket.timeout:continue
                 packet=json.loads(data);received.append(packet);counter+=1
                 ack=dict(session=packet['session'],seq=packet['seq'],hardware_counter=counter,
-                         hardware_age_ms=0,device_sequence=packet['seq'],device_event=0,active_slot=4)
+                         hardware_age_ms=0,worker_protocol=3,device_protocol=3,device_sequence=packet['seq'],device_event=0,active_slot=4)
                 udp.sendto(json.dumps(ack).encode(),peer)
         thread=threading.Thread(target=device_simulator,daemon=True);thread.start()
         service=BridgeService(udp.getsockname()[1]);sdk=None
@@ -72,16 +72,28 @@ class BridgeApiTests(unittest.TestCase):
             path=Path(folder)/'config.json';path.write_text(json.dumps(dict(url='http://example.com',token='x'*32)))
             with self.assertRaises(ValueError):BridgeServiceClient(path)
 
+    def test_old_worker_or_device_revision_cannot_enable_output(self):
+        service=BridgeService()
+        try:
+            service.client.seq=service.first_sequence
+            for worker,device in ((None,None),(2,3),(3,2),(3,None)):
+                service.client.status=lambda:dict(receiver='receiving',hardware='heartbeat verified',
+                    worker_protocol=worker,device_protocol=device,active_slot=2,
+                    device_sequence=service.first_sequence,device_event=0)
+                self.assertFalse(service.status()['ready'])
+                self.assertIn('version mismatch',service.status()['stage'])
+        finally:service.close()
+
     def test_old_device_sequence_cannot_verify_a_new_session(self):
         service=BridgeService()
         try:
             service.client.status=lambda:dict(receiver='receiving',hardware='heartbeat verified',
-                active_slot=4,device_sequence=service.first_sequence-1,device_event=0)
+                worker_protocol=3,device_protocol=3,active_slot=4,device_sequence=service.first_sequence-1,device_event=0)
             self.assertFalse(service.status()['ready'])
             self.assertEqual(service.status()['stage'],'Titan script payload echo missing')
             service.client.seq=service.first_sequence
             service.client.status=lambda:dict(receiver='receiving',hardware='heartbeat verified',
-                active_slot=4,device_sequence=service.first_sequence,device_event=0)
+                worker_protocol=3,device_protocol=3,active_slot=4,device_sequence=service.first_sequence,device_event=0)
             self.assertTrue(service.status()['ready'])
         finally:service.close()
 
@@ -95,7 +107,7 @@ class BridgeApiTests(unittest.TestCase):
             self.assertEqual(service.expected_slot,4)
             service.configure(expected_slot=None)
             service.client.status=lambda:dict(receiver='receiving',hardware='heartbeat verified',
-                active_slot=None,device_sequence=service.client.seq,device_event=0)
+                worker_protocol=3,device_protocol=3,active_slot=None,device_sequence=service.client.seq,device_event=0)
             self.assertFalse(service.status()['ready'])
             self.assertFalse(service.verify(timeout=.1)['ready'])
             for value in (0,10,True,'4'):

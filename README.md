@@ -1,5 +1,20 @@
 # NBA 2K shot-meter CV pipeline
 
+## Rhythm and Timing shot modes (2026102201)
+
+The Live Detection sidebar now selects **rhythm** or **timing**. Changing mode disarms output; release X and RS, then explicitly arm again. This replaces the earlier X-to-RS conversion described in older release notes below.
+
+- **Rhythm:** hold the actual RS opposite the selected flick direction (default: RS down). The script preserves your hold, recognizes an observed meter before green, then applies the configured delay (default 45 ms), flick (default RS up for 100 ms), and neutral. Releasing early does not trigger a fallback flick. One flick is allowed per hold; neutral RS rearms the hold logic.
+- **Timing:** hold Xbox X normally. A fresh observed green event releases X immediately, with no RS output and no rhythm delay. X stays suppressed until you physically release it, preventing a second press while held.
+- RT, movement and unrelated inputs pass through in both modes. R3 cancels automation; it no longer maps R3 to X. Disarm, stale data, cancellation and mode changes require a fresh neutral/released input before another automated shot.
+
+**One-time Titan migration:** update the app, use **Open Bridge Files**, compile/install the exported `titan_meter.gpc` (bridge **3.0**) in your chosen slot, and stop/restart the updated `gtuner_meter` worker in Gtuner Computer Vision with Null Video Input. An app update cannot rewrite a script already stored on Titan. The new app refuses to arm against a v2 worker or Titan script and explains the mismatch. Old and new bridge files must not be mixed.
+
+The new GCV payload is **26 bytes**, retaining offsets 0..24 from the historical layout, with version **3** at byte 2 and shot mode at byte 25 (**0 rhythm, 1 timing**). The device heartbeat adds a final `:3` protocol revision; both worker and device revisions plus a current payload echo are required for readiness. Byte zero remains zero so the old Onyx flag reader cannot fire on metadata.
+
+The current detector recognizes the **meter**, not the player's jump animation. Player-animation onset is future detection work. Tests cover both mode values through real local API/UDP/GCV encoding, mode/arming resets, and the actual GPC main-body state machine under a C++ controller shim. The shim is not the Gtuner vendor compiler. These tests do not establish physical Xbox actions, successful shots, or detection accuracy on gameplay; validate each mode in practice with the separate testing workflow.
+
+
 This project focuses on meter detection, continuous per-frame tracking, and measurable validation. It takes a trained Ultralytics detector (`best.pt`) and gameplay MP4. Inference is performed on every decoded frame; no frame skipping is used. Keep this folder separate from the older scripts so the original project remains intact.
 
 ## Desktop app (Windows)

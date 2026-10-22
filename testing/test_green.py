@@ -58,9 +58,17 @@ class GateTests(unittest.TestCase):
         result=gate.update(state(),measurement(True),10,now=10)
         self.assertFalse(result['eligible']);self.assertFalse(result['candidate'])
 
+    def test_mode_switch_resets_approach_and_latch(self):
+        gate=GreenGate(green_config(dict(armed=True)))
+        gate.update(state(),measurement(False),10,now=10)
+        gate.configure(dict(gate.config,shot_mode='timing'))
+        result=gate.update(state(),measurement(True),10,now=10)
+        self.assertFalse(result['eligible']);self.assertFalse(result['candidate'])
+        self.assertEqual(result['shot_mode'],'timing')
+
     def test_configuration_rejects_bad_and_nonfinite_values(self):
         for overrides in [dict(hue_low=100,hue_high=50),dict(armed='yes'),dict(delay_ms=-1),
-                          dict(hold_ms=0),dict(row_coverage=float('nan')),dict(direction='left')]:
+                          dict(hold_ms=0),dict(row_coverage=float('nan')),dict(direction='left'),dict(shot_mode='invalid')]:
             with self.assertRaises(ValueError):green_config(overrides)
 
 
@@ -72,10 +80,17 @@ class ProtocolTests(unittest.TestCase):
 
     def test_packet_offsets_match_gpc_and_byte_zero_cannot_trigger_onyx(self):
         packet=self.packet();data=gcv.encode(packet,True)
-        self.assertEqual(len(data),25)
-        self.assertEqual(list(data[:7]),[0,77,2,1,1,1,0])
+        self.assertEqual(len(data),26)
+        self.assertEqual(list(data[:7]),[0,77,3,1,1,1,0])
         self.assertEqual(struct.unpack('>HHIII',data[7:23]),(45,100,42,8,19))
-        self.assertTrue(25<=struct.unpack('>H',data[23:])[0]<=100)
+        self.assertTrue(25<=struct.unpack('>H',data[23:25])[0]<=100)
+
+    def test_both_modes_have_distinct_wire_values_and_bad_modes_are_rejected(self):
+        for mode,wire in (('rhythm',0),('timing',1)):
+            packet=self.packet();packet['trigger']['shot_mode']=mode
+            self.assertEqual(gcv.encode(packet,True)[25],wire)
+        packet=self.packet();packet['trigger']['shot_mode']='invalid'
+        with self.assertRaises(ValueError):gcv.encode(packet,True)
 
     def test_dry_run_stale_predicted_or_unconfirmed_never_triggers(self):
         for change in ('dry','stale','predicted','unconfirmed'):
@@ -136,6 +151,6 @@ class GpcReadContractTests(unittest.TestCase):
         self.assertEqual(calls,['offset, &value'])
         offsets=[int(n) for n in re.findall(r'cv_byte\((\d+)\)',source)]
         self.assertTrue(offsets)
-        self.assertTrue(all(0<=n<25 for n in offsets))
+        self.assertTrue(all(0<=n<26 for n in offsets))
         self.assertIn('uint8 value;',source)
         self.assertIn('return value;',source)

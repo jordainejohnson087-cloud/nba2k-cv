@@ -26,16 +26,22 @@ def wait_for(predicate,timeout=2):
 
 
 class GreenBridgeTests(unittest.TestCase):
-    def test_observed_green_becomes_one_event_and_disarm_removes_output(self):
+    def test_rhythm_observed_green_and_disarm(self):
+        self.check_mode('rhythm')
+
+    def test_timing_observed_green_and_disarm(self):
+        self.check_mode('timing')
+
+    def check_mode(self,mode):
         with patch.object(gcv,'PORT',0):worker=gcv.GCVWorker(1920,1080)
         payloads=[];stopped=threading.Event();sequence=0;event=0;counter=0;errors=[]
-        def echo():return f'T2CV:{counter}:{sequence}:{event}:2'
+        def echo():return f'T2CV:{counter}:{sequence}:{event}:2:3'
         def callbacks():
             nonlocal sequence,event,counter
             try:
                 while not stopped.is_set():
                     _,data=worker.process(None);counter+=1
-                    if len(data)==25:
+                    if len(data)==26:
                         sequence=int.from_bytes(data[19:23],'big')
                         if data[4] and data[5]:event=int.from_bytes(data[11:15],'big')
                         payloads.append(data)
@@ -48,7 +54,7 @@ class GreenBridgeTests(unittest.TestCase):
                 service.configure(enabled=True,expected_slot=2)
                 self.assertTrue(service.verify(timeout=2,expected_slot=2)['ready'])
                 service.allow_output(True)
-                gate=GreenGate(green_config(dict(armed=True,max_age_ms=250)))
+                gate=GreenGate(green_config(dict(armed=True,max_age_ms=250,shot_mode=mode)))
                 fixture=green_fixtures.ColorTests();fixture.setUp()
                 with tempfile.TemporaryDirectory() as folder:
                     config=Path(folder)/'bridge.json';service.write_config(config);sdk=BridgeServiceClient(config)
@@ -68,6 +74,7 @@ class GreenBridgeTests(unittest.TestCase):
                     self.assertTrue(wait_for(lambda:any(p[4] and p[5] for p in payloads)),errors)
                     event_ids={int.from_bytes(p[11:15],'big') for p in payloads if p[4] and p[5]}
                     self.assertEqual(event_ids,{1})
+                    self.assertTrue(all(p[25]==int(mode=='timing') for p in payloads if p[4] and p[5]))
                     self.assertTrue(wait_for(lambda:service.status().get('device_event')==1))
                     service.allow_output(False);service.clear()
                     self.assertTrue(wait_for(lambda:payloads and payloads[-1][4]==0))

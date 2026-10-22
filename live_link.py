@@ -95,6 +95,7 @@ class BridgeClient:
         self.hardware_counter = None
         self.device_sequence = self.device_event = None
         self.active_slot = None
+        self.worker_protocol = self.device_protocol = None
 
     def send(self, state, observed_at=None):
         now = self.clock()
@@ -127,6 +128,8 @@ class BridgeClient:
                 self.rtt_ms = (now-self.pending.pop(seq))*1000
                 self.last_ack = now
                 self.acked += 1
+                self.worker_protocol=ack.get('worker_protocol')
+                self.device_protocol=ack.get('device_protocol')
                 counter = ack.get('hardware_counter')
                 age = ack.get('hardware_age_ms')
                 if (type(counter) is int and type(age) in (int,float) and math.isfinite(age)
@@ -146,7 +149,9 @@ class BridgeClient:
         now = self.clock()
         linked = self.last_ack is not None and now-self.last_ack < .75
         hardware = linked and self.last_hardware is not None and now-self.last_hardware < 1.5
-        return dict(receiver='receiving' if linked else 'waiting for Gtuner',
+        return dict(worker_protocol=self.worker_protocol if linked else None,
+                    device_protocol=self.device_protocol if hardware else None,
+                    receiver='receiving' if linked else 'waiting for Gtuner',
                     hardware='heartbeat verified' if hardware else 'not verified',
                     active_slot=self.active_slot if hardware else None,
                     rtt_ms=self.rtt_ms, sent=self.sent, acknowledged=self.acked,
@@ -154,7 +159,7 @@ class BridgeClient:
                     device_event=self.device_event if hardware else None)
 
     def probe(self, timeout=5, sleep=time.sleep, expected_slot=None):
-        """Verify a v2 payload echo using an unarmed challenge before capture opens."""
+        """Verify a v3 payload echo using an unarmed challenge before capture opens."""
         self.seq=secrets.randbelow(0x7fffffff)+1
         first=self.seq+1
         deadline=self.clock()+timeout
@@ -166,6 +171,7 @@ class BridgeClient:
             status=self.send(neutral)
             sequence=status.get('device_sequence')
             if (status['hardware']=='heartbeat verified' and type(sequence) is int
+                    and status.get('worker_protocol')==3 and status.get('device_protocol')==3
                     and first<=sequence<=self.seq
                     and (expected_slot is None or status.get('active_slot')==expected_slot)):
                 return dict(status,ready=True)

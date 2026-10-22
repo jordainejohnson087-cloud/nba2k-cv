@@ -33,7 +33,7 @@ class BridgeProcessTests(unittest.TestCase):
                 except socket.timeout:continue
                 packet=json.loads(data);packets.append(packet);counter+=1
                 ack=dict(session=packet['session'],seq=packet['seq'],hardware_counter=counter,
-                    hardware_age_ms=0,device_sequence=packet['seq'],device_event=0,active_slot=2)
+                    hardware_age_ms=0,worker_protocol=3,device_protocol=3,device_sequence=packet['seq'],device_event=0,active_slot=2)
                 udp.sendto(json.dumps(ack).encode(),peer)
         receiver_thread=threading.Thread(target=receiver,daemon=True);receiver_thread.start()
         host=BridgeProcess(sys.executable,RUNTIME,udp.getsockname()[1])

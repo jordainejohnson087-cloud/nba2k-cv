@@ -498,10 +498,14 @@ class Desktop(tk.Tk):
         ttk.Separator(device_card).pack(fill='x',pady=8)
         ttk.Button(device_card,text='Arm Meter Shots',style='Accent.TButton',command=self._arm_shots).pack(fill='x',pady=4)
         ttk.Button(device_card,text='Disarm Shots',command=self._disarm_shots).pack(fill='x',pady=4)
-        ttk.Label(device_card,text='Hold Xbox X to begin the shot. A fresh green-meter event commands the selected right-stick flick. Disarm Shots stops automatic output.',
+        ttk.Label(device_card,text='Rhythm: hold RS opposite the flick direction; observed green starts the flick. Timing: hold X; observed green releases X. RT and movement pass through.',
             style='CardMuted.TLabel',wraplength=235).pack(anchor='w',pady=6)
         ttk.Label(device_card,textvariable=self.green_status,style='CardMuted.TLabel',wraplength=235).pack(anchor='w',pady=6)
-        ttk.Label(device_card,text='Direction').pack(anchor='w')
+        ttk.Label(device_card,text='Shot mode').pack(anchor='w')
+        self.shot_mode_menu=mode_menu=ttk.Combobox(device_card,textvariable=self.green_vars['shot_mode'],values=('rhythm','timing'),state='readonly')
+        mode_menu.pack(fill='x',pady=4)
+        mode_menu.bind('<<ComboboxSelected>>',lambda event:self._shot_mode_changed())
+        ttk.Label(device_card,text='Rhythm flick direction').pack(anchor='w')
         ttk.Combobox(device_card,textvariable=self.green_vars['direction'],values=('up','down'),state='readonly').pack(fill='x',pady=4)
         ttk.Button(device_card,text='Apply Shot Settings',command=self._apply_green).pack(fill='x',pady=4)
         ttk.Label(device_card,textvariable=self.bridge_status,style='CardMuted.TLabel',wraplength=235).pack(anchor='w',pady=8)
@@ -613,10 +617,10 @@ class Desktop(tk.Tk):
             row,column=divmod(index,3)
             ttk.Label(calibration,text=title).grid(row=row,column=column*2,sticky='w',padx=4,pady=3)
             ttk.Entry(calibration,textvariable=self.green_vars[key],width=9).grid(row=row,column=column*2+1,padx=4)
-        ttk.Label(calibration,text='Flick direction').grid(row=4,column=0,sticky='w',padx=4)
+        ttk.Label(calibration,text='Rhythm flick direction').grid(row=4,column=0,sticky='w',padx=4)
         ttk.Combobox(calibration,textvariable=self.green_vars['direction'],values=('up','down'),
             state='readonly',width=9).grid(row=4,column=1)
-        ttk.Checkbutton(calibration,text='Enable calibrated green trigger (hold shoot button)',
+        ttk.Checkbutton(calibration,text='Enable calibrated green trigger (Rhythm: RS; Timing: X)',
             variable=self.trigger_armed).grid(row=5,column=0,columnspan=6,sticky='w',pady=6)
         ttk.Button(calibration,text='Apply Detection / Flick Settings',command=self._apply_green).grid(row=6,column=0,columnspan=6,sticky='w')
         ttk.Label(calibration,textvariable=self.green_status,wraplength=950).grid(row=7,column=0,columnspan=6,sticky='w',pady=4)
@@ -879,7 +883,7 @@ class Desktop(tk.Tk):
                     else:
                         result=current
                     if not result['ready'] and not read_only:
-                        error=result['stage']+'. Connect Titan PROG to this PC, compile and install the updated bridge 2.1 titan_meter.gpc in the selected slot, and start bridge/gtuner_meter.py in Gtuner Computer Vision with Null Video Input. Keep that worker running; opening the files alone does not start it. Console OUTPUT/authentication is separate.'
+                        error=result['stage']+'. Connect Titan PROG to this PC, compile and install the updated bridge 3.0 titan_meter.gpc in the selected slot, and start bridge/gtuner_meter.py in Gtuner Computer Vision with Null Video Input. Keep that worker running; opening the files alone does not start it. Console OUTPUT/authentication is separate.'
                 if found and result is not None:result=dict(result,gtuner_path=str(found))
             except Exception as exc:
                 error=str(exc);result=service.status()
@@ -893,10 +897,15 @@ class Desktop(tk.Tk):
 
     def _green_values(self):
         defaults=green_config()
-        values={key:(str(var.get()) if key=='direction' else
+        values={key:(str(var.get()) if key in ('direction','shot_mode') else
             float(var.get()) if type(defaults[key]) is float else int(var.get()))
             for key,var in self.green_vars.items()}
         return green_config(dict(values,armed=self.trigger_armed.get()))
+
+    def _shot_mode_changed(self):
+        # A different controller mechanic always requires explicit re-arming.
+        self._disarm_shots()
+        self.session_status.set('Shot mode changed — release X and RS, then arm when ready.')
 
     def _apply_green(self):
         try:config=self._green_values()
@@ -915,7 +924,7 @@ class Desktop(tk.Tk):
                 if self.bridge_service:self.bridge_service.clear()
         if self.bridge_service:self.bridge_service.allow_output(config["armed"] and self.bridge_enabled.get())
         self._save()
-        self.status.set(blocked or ('Green settings applied • '+('trigger enabled — hold X to shoot' if config['armed'] else 'dry run')))
+        self.status.set(blocked or ('Green settings applied • '+('trigger enabled — use the selected shot mode' if config['armed'] else 'dry run')))
 
     def _detector_status(self):
         if not self.live_active or not self.active_out:return None
@@ -940,7 +949,7 @@ class Desktop(tk.Tk):
 
     def _arm_shots(self):
         self.trigger_armed.set(True);self._apply_green()
-        if self.trigger_armed.get():self.session_status.set('ARMED — hold X; observed green controls the flick. Disarm Shots stops output.')
+        if self.trigger_armed.get():self.session_status.set('ARMED — Rhythm: hold RS; Timing: hold X. Observed green controls output. Disarm Shots stops output.')
 
     def _disarm_shots(self):
         self.trigger_armed.set(False)

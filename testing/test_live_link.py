@@ -151,7 +151,7 @@ class BridgePreflightTests(unittest.TestCase):
             packets.append(state)
             client.seq+=1
             return dict(receiver='receiving',hardware='heartbeat verified',
-                        device_sequence=client.seq if len(packets)>1 else 1)
+                        worker_protocol=3,device_protocol=3,device_sequence=client.seq if len(packets)>1 else 1)
         try:
             with patch.object(client,'send',side_effect=send):
                 result=client.probe(timeout=1,sleep=lambda delay:ticks.__setitem__(0,ticks[0]+delay))
@@ -167,7 +167,7 @@ class BridgePreflightTests(unittest.TestCase):
             client=BridgeClient(26740);ticks=[0.0];client.clock=lambda:ticks[0]
             try:
                 with patch.object(client,'send',return_value=dict(receiver='receiving',
-                        hardware=hardware,device_sequence=sequence)):
+                        hardware=hardware,worker_protocol=3,device_protocol=3,device_sequence=sequence)):
                     result=client.probe(timeout=.2,sleep=lambda delay:ticks.__setitem__(0,ticks[0]+delay))
                 self.assertFalse(result['ready'])
             finally:client.close()
@@ -178,7 +178,7 @@ class SlotEvidenceTests(unittest.TestCase):
         client=BridgeClient(26740);ticks=[0.0];client.clock=lambda:ticks[0]
         def wrong(state):
             client.seq+=1
-            return dict(receiver='receiving',hardware='heartbeat verified',device_sequence=client.seq,active_slot=3)
+            return dict(receiver='receiving',hardware='heartbeat verified',worker_protocol=3,device_protocol=3,device_sequence=client.seq,active_slot=3)
         try:
             with patch.object(client,'send',side_effect=wrong):
                 result=client.probe(timeout=.2,expected_slot=4,sleep=lambda delay:ticks.__setitem__(0,ticks[0]+delay))
