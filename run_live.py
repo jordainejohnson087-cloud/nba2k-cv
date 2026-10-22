@@ -398,6 +398,7 @@ def run(args, cv2, torch, YOLO):
         capture_session=str(shared) if shared else None,
         capture_frames=cap.source_span if shared else pump.frames if pump else count,skipped_inference_frames=skipped_frames,
         capture_reader_stopped=capture_reader_stopped,capture_error=pump.error if pump else cap.error if shared else None,
+        capture_status_read_failures=cap.status_read_failures if shared else 0,
         direct_preview_error=display_state['error'],
         capture_read_fps=(cap.info.get('capture_fps',0) if shared else pump.frames/elapsed if pump and elapsed else count/elapsed if elapsed else 0),
         capture_interval_p95_ms=(sorted(pump.intervals)[int(.95*(len(pump.intervals)-1))] if pump and pump.intervals else None),

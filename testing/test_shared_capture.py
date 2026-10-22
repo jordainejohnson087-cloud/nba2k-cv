@@ -4,6 +4,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -11,10 +12,107 @@ import cv2
 import numpy as np
 import run_live
 import test_live
-from capture_pipe import SharedCapture
+from capture_pipe import SharedCapture, RawMailbox
 
 
 class SeparateCaptureTests(unittest.TestCase):
+    @contextmanager
+    def shared_fixture(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            status=dict(state='capturing',timestamp=time.time(),capture_fps=60,
+                        reported_capture=dict(width=32,height=24,fps=60))
+            (root/'capture_status.json').write_text(json.dumps(status))
+            writer=RawMailbox(root/'source_frames.bin',write=True,capacity=32*24*3)
+            writer.publish(np.zeros((24,32,3),np.uint8),cv2,0,time.time())
+            reader=SharedCapture(root,cv2)
+            try:
+                self.assertTrue(reader.isOpened(),reader.error)
+                yield root,writer,reader,status
+            finally:
+                reader.release();writer.close()
+
+    def test_locked_status_does_not_stop_fresh_frames(self):
+        with self.shared_fixture() as (_,writer,reader,_):
+            with patch.object(reader,'_status',side_effect=PermissionError(13,'Windows sharing violation')):
+                for index in range(1,7):
+                    writer.publish(np.full((24,32,3),index,np.uint8),cv2,index,time.time())
+                    reader.status_refresh_at=0
+                    ok,frame=reader.read()
+                    self.assertTrue(ok,reader.error)
+                    self.assertEqual(int(frame[0,0,0]),index)
+                    self.assertIsNone(reader.error)
+            self.assertEqual(reader.status_read_failures,6)
+            self.assertIn('sharing violation',reader.status_error)
+            reader.status_refresh_at=0
+            writer.publish(np.zeros((24,32,3),np.uint8),cv2,7,time.time())
+            self.assertTrue(reader.read()[0]);self.assertIsNone(reader.status_error)
+
+    def test_stale_or_malformed_status_does_not_override_fresh_frame(self):
+        with self.shared_fixture() as (root,writer,reader,status):
+            status['timestamp']=time.time()-30
+            (root/'capture_status.json').write_text(json.dumps(status))
+            # A new detector can attach using live frame publication even if optional JSON is stale.
+            second=SharedCapture(root,cv2)
+            try:self.assertTrue(second.isOpened(),second.error)
+            finally:second.release()
+            for content in (json.dumps(status),'{', '[]'):
+                (root/'capture_status.json').write_text(content)
+                reader.status_refresh_at=0
+                writer.publish(np.zeros((24,32,3),np.uint8),cv2,1,time.time())
+                self.assertTrue(reader.read()[0],reader.error)
+
+    def test_locked_status_cannot_keep_dead_capture_alive(self):
+        with self.shared_fixture() as (_,writer,reader,_):
+            writer.publish(np.zeros((24,32,3),np.uint8),cv2,1,time.time()-5)
+            with patch.object(reader,'_status',side_effect=PermissionError(13,'status locked')):
+                start=time.monotonic();ok,frame=reader.read()
+            self.assertFalse(ok);self.assertIsNone(frame)
+            self.assertLess(time.monotonic()-start,2)
+            self.assertIn('No fresh capture frame',reader.error)
+
+    def test_explicit_capture_stop_is_honored_with_fresh_buffer(self):
+        with self.shared_fixture() as (root,_,reader,status):
+            status.update(state='stopped',error='capture card read failed')
+            (root/'capture_status.json').write_text(json.dumps(status))
+            self.assertFalse(reader.read()[0])
+            self.assertEqual(reader.error,'capture card read failed')
+
+    def test_startup_retries_temporary_status_lock(self):
+        with self.shared_fixture() as (root,_,_,status):
+            with patch.object(SharedCapture,'_status',side_effect=[PermissionError(13,'locked'),status]):
+                reader=SharedCapture(root,cv2)
+                try:
+                    self.assertTrue(reader.isOpened(),reader.error)
+                    self.assertEqual(reader.status_read_failures,1)
+                finally:reader.release()
+
+    @unittest.skipUnless(sys.platform=='win32','Requires native Windows exclusive file locks')
+    def test_native_exclusive_status_lock_preserves_stream_and_recovers(self):
+        import ctypes
+        from ctypes import wintypes
+        kernel=ctypes.WinDLL('kernel32',use_last_error=True)
+        create=kernel.CreateFileW
+        create.argtypes=[wintypes.LPCWSTR,wintypes.DWORD,wintypes.DWORD,ctypes.c_void_p,
+                         wintypes.DWORD,wintypes.DWORD,wintypes.HANDLE]
+        create.restype=wintypes.HANDLE
+        close=kernel.CloseHandle;close.argtypes=[wintypes.HANDLE];close.restype=wintypes.BOOL
+        with self.shared_fixture() as (root,writer,reader,_):
+            handle=create(str(root/'capture_status.json'),0x80000000,0,None,3,0x80,None)
+            if handle==ctypes.c_void_p(-1).value:raise ctypes.WinError(ctypes.get_last_error())
+            try:
+                with self.assertRaises(PermissionError):reader._status()
+                for index in range(1,6):
+                    writer.publish(np.full((24,32,3),index,np.uint8),cv2,index,time.time())
+                    reader.status_refresh_at=0
+                    self.assertTrue(reader.read()[0],reader.error)
+                self.assertEqual(reader.status_read_failures,5)
+                self.assertIsNone(reader.error)
+            finally:close(handle)
+            writer.publish(np.zeros((24,32,3),np.uint8),cv2,6,time.time())
+            reader.status_refresh_at=0
+            self.assertTrue(reader.read()[0]);self.assertIsNone(reader.status_error)
+
     def test_capture_only_cli_never_imports_torch_or_requires_model(self):
         import builtins
         original=builtins.__import__

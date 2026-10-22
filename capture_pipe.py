@@ -127,13 +127,28 @@ class SharedCapture:
     def __init__(self,session,cv2):
         self.session=Path(session);self.cv2=cv2;self.mailbox=None;self.sequence=0
         self.first_source=None;self.sample_source_frame=-1;self.captured_at=0
-        self.source_span=0;self.error=None
+        self.source_span=0;self.error=None;self.status_read_failures=0;self.status_error=None
+        self.status_refresh_at=0
         try:
-            self.info=self._status()
-            if self.info.get('state')!='capturing' or time.time()-self.info['timestamp']>2:
-                raise ValueError('Start Capture and wait for a live console image first')
             self.mailbox=RawMailbox(self.session/'source_frames.bin')
-        except (OSError,ValueError,KeyError) as exc:self.error=str(exc)
+            deadline=time.monotonic()+1
+            while True:
+                try:
+                    self.info=self._status()
+                    if not isinstance(self.info,dict):raise ValueError('Invalid capture status')
+                    break
+                except (OSError,ValueError) as exc:
+                    self.status_read_failures+=1;self.status_error=str(exc)
+                    if time.monotonic()>=deadline:raise
+                    time.sleep(.01)
+            progress=self.mailbox.progress()
+            fresh=progress and 0<=time.time()-progress['timestamp']<=.75
+            if self.info.get('state')!='capturing' or (not fresh and time.time()-self.info['timestamp']>2):
+                raise ValueError('Start Capture and wait for a live console image first')
+            self.status_error=None
+        except (OSError,ValueError,KeyError,TypeError) as exc:
+            self.error=str(exc)
+            if self.mailbox:self.mailbox.close();self.mailbox=None
 
     def _status(self):return json.loads((self.session/'capture_status.json').read_text())
     def isOpened(self):return self.mailbox is not None and self.error is None
@@ -146,10 +161,20 @@ class SharedCapture:
     def read(self):
         end=time.monotonic()+.75
         while time.monotonic()<end:
+            # JSON is optional telemetry after opening. A Windows reader lock must
+            # not turn a healthy shared frame stream into a device disconnect.
+            if time.monotonic()>=self.status_refresh_at:
+                self.status_refresh_at=time.monotonic()+.1
+                try:
+                    info=self._status()
+                    if not isinstance(info,dict):raise ValueError('Invalid capture status')
+                    if info.get('state')=='stopped':
+                        self.error=info.get('error') or 'Capture stopped';return False,None
+                    if info.get('state')=='capturing':self.info=info
+                    self.status_error=None
+                except (OSError,ValueError) as exc:
+                    self.status_read_failures+=1;self.status_error=str(exc)
             try:
-                info=self._status()
-                if info.get('state')!='capturing' or time.time()-info['timestamp']>2:
-                    self.error='Capture stopped or became stale';return False,None
                 sample=self.mailbox.read(self.sequence)
                 if sample and 0<=time.time()-sample['timestamp']<=.75:
                     import numpy as np
@@ -157,11 +182,12 @@ class SharedCapture:
                     if self.first_source is None:self.first_source=sample['source_frame']
                     self.sample_source_frame=sample['source_frame']-self.first_source
                     self.source_span=self.sample_source_frame+1
-                    self.info=info
                     return True,np.frombuffer(sample['bgr'],dtype=np.uint8).reshape(sample['height'],sample['width'],3).copy()
             except (OSError,ValueError,KeyError) as exc:self.error=str(exc);return False,None
             time.sleep(.002)
-        self.error='No fresh capture frame arrived';return False,None
+        self.error='No fresh capture frame arrived for 750 ms'
+        if self.status_error:self.error+='; last status read: '+self.status_error
+        return False,None
 
     def release(self):
         if self.mailbox:self.mailbox.close();self.mailbox=None
