@@ -57,6 +57,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     action=parser.add_mutually_exclusive_group(required=True)
     action.add_argument('--tap', choices=('A', 'X', 'RELEASE_X'))
+    action.add_argument('--ai-x-shot', action='store_true', help='Start one armed AI-timed X hold through gtuner_meter')
     action.add_argument('--hold-x-ms', type=int, help='Hold X for 100..2000 ms, then release')
     parser.add_argument('--port',type=int,default=PORT,help='Loopback test port (normally 26741)')
     args = parser.parse_args()
@@ -66,7 +67,10 @@ def main():
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         def send(action):
             sock.sendto(('T2TEST:' + action + ':' + str(time.time())).encode('ascii'), ('127.0.0.1', args.port))
-        if args.hold_x_ms is not None:
+        if args.ai_x_shot:
+            send('AI_HOLD_X')
+            print('Sent one AI X hold request. The armed meter bridge controls release; Xbox receipt is unverified.')
+        elif args.hold_x_ms is not None:
             try:
                 send('HOLD_X')
                 time.sleep(args.hold_x_ms/1000)

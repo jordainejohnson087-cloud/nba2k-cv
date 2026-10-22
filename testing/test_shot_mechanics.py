@@ -68,7 +68,7 @@ int main(){
   bytes[7]=0;bytes[8]=45;bytes[9]=0;bytes[10]=100;
   for(int n=0;n<4;++n){bytes[11+n]=(event>>(24-8*n))&255;bytes[19+n]=(seq>>(24-8*n))&255;}
   bytes[23]=0;bytes[24]=lifetime;bytes[25]=mode;
-  if(legacy){bytes[0]=84;bytes[1]=49;bytes[2]=legacy==3?0:legacy==4?3:legacy==5?4:legacy;}
+  if(legacy){bytes[0]=84;bytes[1]=49;bytes[2]=legacy==3?0:legacy==4?3:legacy==5?4:legacy==6?5:legacy;}
   test_tap=0;
   for(int n=0;n<32;++n){actual[n]=0;output[n]=0;}
   actual[17]=x;actual[20]=ry;actual[6]=r3;actual[4]=70;actual[5]=40;
@@ -176,6 +176,51 @@ int main(){
             self.assertEqual([r[0] for r in out],[100,100,0,100,0,100])
             out=self.run_frames([dict(legacy=5),dict(deliver=0,dt=2000),dict(deliver=0,dt=500)])
             self.assertEqual([r[0] for r in out],[100,100,0])
+
+    def test_ai_hold_survives_neutral_callback_and_releases_on_observed_green(self):
+        out=self.run_frames([{},dict(legacy=6),dict(legacy=3),dict(seen=1),
+            dict(seen=1,green=1,event=8),dict(seen=1,green=1,event=8)])
+        self.assertEqual([r[0] for r in out],[0,100,100,100,0,0])
+        self.assertEqual(out[1][7:9],[1,5]);self.assertTrue(out[1][10]&4096)
+        self.assertEqual(out[-1][5],8);self.assertFalse(out[-1][10]&4096)
+
+    def test_ai_hold_disarm_and_link_loss_release_without_a_green_action(self):
+        for stop in (dict(arm=0),dict(deliver=0,dt=300)):
+            with self.subTest(stop=stop):
+                out=self.run_frames([{},dict(legacy=6),stop,dict(arm=0)])
+                self.assertEqual([r[0] for r in out],[0,100,0,0]);self.assertEqual(out[-1][5],0)
+
+    def test_ai_hold_requires_armed_neutral_x_and_rejects_repeated_start(self):
+        for initial in (dict(arm=0),dict(mode=0),dict(x=100)):
+            out=self.run_frames([initial,dict(legacy=6,x=initial.get('x',0))])
+            self.assertEqual(out[-1][7],0)
+        out=self.run_frames([{},dict(legacy=6),dict(legacy=3),dict(legacy=6)])
+        self.assertEqual([r[7] for r in out],[0,1,1,1])
+
+    def test_ai_hold_times_out_with_live_frames_but_no_green(self):
+        out=self.run_frames([{},dict(legacy=6)]+[dict(dt=500) for _ in range(5)])
+        self.assertEqual(out[-1][0],0);self.assertEqual(out[-1][5],0)
+        self.assertTrue(out[-1][10]&8192);self.assertFalse(out[-1][10]&4096)
+
+    def test_synthetic_meter_measurement_drives_ai_hold_release(self):
+        import time
+        from meter_green import GreenGate,green_config,measure_green
+        from run_video import estimate_fill
+        from test_green import ColorTests,gcv
+        fixture=ColorTests();fixture.setUp()
+        gate=GreenGate(green_config(dict(armed=True,shot_mode='timing',max_age_ms=250)))
+        frames=[{},dict(legacy=6),dict(legacy=3)]
+        for front in (70,55,33):
+            image=fixture.frame(front=front);fill=estimate_fill(image,fixture.box)
+            measurement=measure_green(image,fixture.box,fill,gate.config)
+            stamp=time.time();state=dict(status='detected',confidence=.9,shot_id=1,fill=fill)
+            state['trigger']=gate.update(state,measurement,stamp)
+            payload=gcv.encode(dict(state,sent_at=stamp,seq=1),True)
+            frames.append(dict(arm=payload[4],seen=payload[3],green=payload[5],
+                event=int.from_bytes(payload[11:15],'big'),lifetime=int.from_bytes(payload[23:25],'big')))
+        out=self.run_frames(frames)
+        self.assertEqual([r[0] for r in out],[0,100,100,100,100,0])
+        self.assertEqual(out[-1][5],1)
 
     def test_rhythm_mode_is_rejected_and_right_stick_never_changes(self):
         out=self.run_frames([dict(mode=0,ry=100),dict(mode=0,x=100,ry=100,seen=1,green=1,event=1)])

@@ -114,3 +114,51 @@ class SessionTests(unittest.TestCase):
             ui._session_tick();ui._live.assert_called_once_with()
             self.assertFalse(ui.session_requested);self.assertIn('Session ready',ui.session_status.get())
 
+
+
+class AiShotLaunchTests(unittest.TestCase):
+    def ui(self,folder):
+        import queue
+        ui=SessionTests().ui(folder)
+        ui.messages=queue.Queue();ui._export_bridge=Mock(return_value=folder)
+        ui.bridge_service.status.return_value.update(device_gate=3349,device_test_count=0,output_allowed=True)
+        return ui
+
+    def test_ai_shot_launch_arms_then_sends_one_powershell_start_without_timer(self):
+        from bridge_service import BridgeProcess
+        with tempfile.TemporaryDirectory() as folder:
+            ui=self.ui(Path(folder))
+            def run(*args,**kwargs):
+                ui.bridge_service.status.return_value.update(device_test_count=1,device_test_button=5)
+                return SimpleNamespace(returncode=0,stdout='AI hold sent',stderr='')
+            with patch('app.sys.platform','win32'),patch.object(BridgeProcess,'powershell_command',return_value=['powershell.exe']) as command,\
+                 patch('app.threading.Thread') as thread,patch('app.subprocess.run',side_effect=run) as sender:
+                thread.return_value.start.side_effect=lambda:thread.call_args.kwargs['target']()
+                Desktop._start_ai_x_shot(ui)
+                self.assertTrue(ui.trigger_armed.get());sender.assert_called_once()
+                self.assertEqual(command.call_args.args[1][-1],'--ai-x-shot')
+                self.assertIn('Titan accepted',ui.messages.get_nowait()[1][0])
+
+    def test_ai_shot_cannot_start_with_old_script_existing_meter_or_physical_hold(self):
+        for condition in ('old','meter','hold','stale'):
+            with self.subTest(condition=condition),tempfile.TemporaryDirectory() as folder:
+                ui=self.ui(Path(folder))
+                if condition=='old':ui.bridge_service.status.return_value['device_gate']=272
+                if condition=='hold':ui.bridge_service.status.return_value['device_gate']|=512
+                if condition=='meter':(Path(folder)/'live_status.json').write_text(json.dumps(dict(timestamp=time.time(),status='detected')))
+                if condition=='stale':(Path(folder)/'live_status.json').write_text(json.dumps(dict(timestamp=time.time()-5,status='absent')))
+                with patch('app.sys.platform','win32'),patch('app.subprocess.run') as sender:
+                    Desktop._start_ai_x_shot(ui);sender.assert_not_called()
+                    self.assertFalse(ui.trigger_armed.get())
+
+    def test_disarm_before_background_launch_prevents_the_hold(self):
+        from bridge_service import BridgeProcess
+        with tempfile.TemporaryDirectory() as folder:
+            ui=self.ui(Path(folder))
+            with patch('app.sys.platform','win32'),patch.object(BridgeProcess,'powershell_command',return_value=['powershell.exe']),\
+                 patch('app.threading.Thread') as thread,patch('app.subprocess.run') as sender:
+                Desktop._start_ai_x_shot(ui)
+                ui.bridge_service.status.return_value['output_allowed']=False
+                thread.call_args.kwargs['target']()
+                sender.assert_not_called()
+                self.assertIn('cancelled',ui.messages.get_nowait()[1][0])

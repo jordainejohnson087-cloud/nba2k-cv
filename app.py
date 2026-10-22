@@ -497,6 +497,7 @@ class Desktop(tk.Tk):
         ttk.Button(device_card,text='Scan USB',command=self._scan_titan_hardware).pack(fill='x',pady=4)
         ttk.Separator(device_card).pack(fill='x',pady=8)
         ttk.Button(device_card,text='Arm Meter Shots',style='Accent.TButton',command=self._arm_shots).pack(fill='x',pady=4)
+        ttk.Button(device_card,text='Start AI X Shot',command=self._start_ai_x_shot).pack(fill='x',pady=4)
         ttk.Button(device_card,text='Disarm Shots',command=self._disarm_shots).pack(fill='x',pady=4)
         ttk.Label(device_card,text='X JUMPSHOTS: hold X through green. The AI releases X output; physically release X afterward. RT, movement and RS pass through.',
             style='CardMuted.TLabel',wraplength=235).pack(anchor='w',pady=6)
@@ -975,6 +976,61 @@ class Desktop(tk.Tk):
             except (OSError,subprocess.SubprocessError) as exc:result=str(exc)
             self.messages.put(('console_test_done',(result,log)))
         threading.Thread(target=send,daemon=True).start()
+
+    def _start_ai_x_shot(self):
+        if getattr(self,'ai_shot_starting',False):return
+        blocked=self._arming_blocker()
+        status=self.bridge_service.status() if self.bridge_service else {}
+        gate=status.get('device_gate')
+        if not blocked and (type(gate) is not int or not gate & 2048):
+            blocked='Install meter bridge 3.6 and restart gtuner_meter for AI X shots.'
+        if not blocked and (self._detector_status() or {}).get('status')!='absent':
+            blocked='Wait for the current meter to disappear before starting an AI X shot.'
+        if not blocked and gate & (512|4096):
+            blocked='Release physical X and wait for the current AI hold to finish.'
+        if blocked:self.session_status.set(blocked);return
+        if sys.platform!='win32':
+            self.session_status.set('AI X shot launch requires Windows PowerShell.');return
+        self._arm_shots()
+        if not self.trigger_armed.get():return
+        try:
+            script=self._export_bridge()/'console_button_check.py'
+            configured=getattr(self,'gtuner_python',None)
+            sender=configured.get() if configured else ''
+            if not sender or not Path(sender).is_file():sender=sys.executable
+            command=BridgeProcess.powershell_command(sender,[str(script),'--ai-x-shot'])
+        except OSError as exc:
+            self._disarm_shots();self.session_status.set(str(exc));return
+        self.ai_shot_starting=True
+        self.session_status.set('Waiting for Titan to arm, then starting one AI-timed X hold…')
+        service=self.bridge_service
+        def start():
+            result='';log=''
+            try:
+                deadline=time.monotonic()+3
+                while time.monotonic()<deadline:
+                    current=service.status();word=current.get('device_gate')
+                    if not current.get('ready') or not current.get('output_allowed'):
+                        raise OSError('AI X shot cancelled: bridge or output permission changed.')
+                    if type(word) is int and word & 2048 and (word & 15) in (0,5,6):break
+                    time.sleep(.025)
+                else:raise OSError('Titan did not become armed and ready. No X hold was sent.')
+                baseline=current.get('device_test_count')
+                outcome=subprocess.run(command,capture_output=True,text=True,timeout=8,
+                    creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+                log=outcome.stdout+outcome.stderr
+                if outcome.returncode:raise OSError('AI X sender failed: '+log.strip())
+                deadline=time.monotonic()+2
+                while time.monotonic()<deadline:
+                    current=service.status()
+                    if (current.get('ready') and type(baseline) is int
+                        and current.get('device_test_count')!=baseline and current.get('device_test_button')==5):
+                        result='Titan accepted AI X hold. Fresh green controls release; watch Titan action and Xbox.';break
+                    time.sleep(.025)
+                if not result:result='AI X hold was sent once but not acknowledged. Check the meter worker and script; no retry was sent.'
+            except (OSError,subprocess.SubprocessError) as exc:result=str(exc)
+            self.messages.put(('ai_shot_started',(result,log)))
+        threading.Thread(target=start,daemon=True).start()
 
     def _green_values(self):
         defaults=green_config()
@@ -1485,6 +1541,10 @@ class Desktop(tk.Tk):
             for _ in range(64):
                 kind,value=self.messages.get_nowait()
                 if kind=='text':self._log(value)
+                elif kind=='ai_shot_started':
+                    self.ai_shot_starting=False
+                    result,log=value;self.session_status.set(result)
+                    self._log('\nAI X shot: '+result+'\n'+log+'\n')
                 elif kind=='console_test_done':
                     self.console_test_busy=False
                     result,log=value;self.console_test_status.set(result)
@@ -1739,7 +1799,10 @@ class Desktop(tk.Tk):
                 gate=self.bridge_service.status().get('device_gate') if self.bridge_service else None
                 reasons={0:'ready',1:'disarmed',2:'link timeout',3:'R3 cancel held',4:'release X to reset',5:'waiting for physical hold',6:'waiting for green command',7:'green command expired',8:'shot action started'}
                 device_note=('Timing' if gate & 16 else 'Rhythm')+' / '+reasons.get(gate & 15,'unknown') if type(gate) is int else 'install X-only meter GPC 3.4'
-                if type(gate) is int:device_note+=' / X input: '+('HELD' if gate & 512 else 'released')
+                if type(gate) is int:
+                    device_note+=' / X input: '+('HELD' if gate & 512 else 'released')
+                    if gate & 4096:device_note+=' / AI X HELD — waiting for fresh green'
+                    elif gate & 8192:device_note+=' / AI X TIMEOUT — released without a green event'
                 self.green_status.set(f"{'ARMED' if trigger.get('armed') else 'DRY RUN'} | "
                     f"in green: {measurement.get('in_green',False)} | event {trigger.get('event_id',0)} | "
                     f"Titan action {self.bridge_service.status().get('device_event',0) if self.bridge_service else 0} | {device_note} | "

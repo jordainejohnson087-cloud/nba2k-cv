@@ -92,6 +92,35 @@ class ManualPathTests(unittest.TestCase):
                 self.assertEqual(worker.process(None)[1],bytearray((84,49,3)))
         finally:worker.__del__()
 
+    def test_real_ai_start_sender_uses_one_distinct_command(self):
+        with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as server:
+            server.bind(('127.0.0.1',0));server.settimeout(2)
+            args=[str(ROOT/'testing/console_button_check.py'),'--ai-x-shot','--port',str(server.getsockname()[1])]
+            command=BridgeProcess.powershell_command(sys.executable,args) if sys.platform=='win32' else [sys.executable,*args]
+            result=subprocess.run(command,capture_output=True,text=True,timeout=10)
+            self.assertEqual(result.returncode,0,result.stderr)
+            payload,_=server.recvfrom(128)
+            self.assertTrue(payload.startswith(b'T2TEST:AI_HOLD_X:'))
+            server.settimeout(.02)
+            with self.assertRaises(socket.timeout):server.recvfrom(128)
+
+    def test_ai_hold_command_requires_fresh_armed_timing_and_absent_meter(self):
+        for allowed,mode,status,armed,stale in ((True,'timing','absent',True,False),
+                (False,'timing','absent',False,False),(False,'rhythm','absent',True,False),
+                (False,'timing','detected',True,False),(False,'timing','absent',True,True)):
+            with self.subTest(mode=mode,status=status,armed=armed,stale=stale),patch.object(gcv,'PORT',0),patch.object(gcv,'TEST_PORT',0):
+                worker=gcv.GCVWorker(1,1)
+                try:
+                    worker.packet=fixtures.ProtocolTests().packet()
+                    worker.packet['status']=status;worker.packet['trigger'].update(armed=armed,shot_mode=mode)
+                    worker.last_packet=time.monotonic()-(1 if stale else 0)
+                    with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as sender:
+                        sender.sendto(f'T2TEST:AI_HOLD_X:{time.time()}'.encode(),worker.test_socket.getsockname())
+                    with patch.dict(sys.modules,gtuner=SimpleNamespace(gpc_string=lambda:None)):
+                        payload=worker.process(None)[1]
+                        self.assertEqual(payload==bytearray((84,49,5)),allowed)
+                finally:worker.__del__()
+
     def test_powershell_command_quotes_paths_and_arguments_as_literals(self):
         with patch('bridge_service.shutil.which',return_value='powershell.exe'):
             command=BridgeProcess.powershell_command('python.exe',["sender's $(anything).py",'--tap','A'])

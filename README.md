@@ -1,5 +1,20 @@
 # NBA 2K shot-meter CV pipeline
 
+## Integrate verified console output with AI X shots (2026102208)
+
+The user confirmed the PowerShell X hold/release test operates the Xbox on October 22, 2026. This establishes the output path; it does not establish meter timing accuracy. The app now adds **Start AI X Shot** to test the complete path in practice: PowerShell requests one X hold, the GPU detector measures the meter, and a fresh observed green event releases that same held output. The 750 ms manual test remains independent; it is not used to time this AI shot. Rhythm remains deferred.
+
+Start Session, wait for fresh capture/detection and a verified **meter bridge 3.6**, then let the meter disappear and release physical X. Click Start AI X Shot. The app arms output, waits for the Titan armed state, and sends one start command through the proven PowerShell/UDP path. It does not spawn a new PowerShell process on the green frame. The persistent detector/bridge path delivers the green event, and GPC uses the same X release operation already tested. Normal physical-X shots still use Arm Meter Shots and controller hold.
+
+Install the exported `titan_meter.gpc` 3.6 and restart `gtuner_meter.py` after updating. The original standalone diagnostic pair intentionally cannot start an AI shot. The worker requires fresh, armed Timing telemetry and an absent meter before accepting a start. The Titan additionally requires neutral physical X, an armed link and no existing hold. Repeated clicks/commands cannot refresh a running hold. A normal neutral callback does not cancel it.
+
+Live status distinguishes **AI X HELD**, the detector's green event ID, the last accepted **Titan action** event ID, and **AI X TIMEOUT**. A timeout releases X after 2500 ms without claiming a green event. Disarm or a 250 ms device-link timeout also releases the AI hold. Stale, predicted, ambiguous or missing meter measurements cannot manufacture a successful release event. Sending or acknowledging a start does not prove Xbox receipt or a made shot.
+
+Validation stays separate from the runtime: tests cover measured synthetic meter frames through GreenGate and GCV encoding into the actual GPC main-body shim; physical hold and AI hold; neutral callbacks; duplicate starts; wrong modes; disarm/link loss; and no-green timeout. Windows validation checks the real PowerShell path, GUI startup and the packaged runtime. Vendor compilation and the live Xbox AI shot remain hardware checks.
+
+Next detection milestone: record complete practice jumpshots and label meter appearance, movement, green crossing and final fill/stop. Compare observed frames, missed frames, late first detections, event age and Titan action IDs before changing weights. Collect failures across supported meter types, resolutions and gameplay/display conditions; keep evaluation clips separate from training clips. A console output test passing is not a reason to automatically promote a new model.
+
+
 ## PowerShell X hold and release (2026102207)
 
 The original standalone receiver accepted only A/X taps, so a RELEASE_X command sent to it was ignored. Both the standalone **test pair 1.1** and **meter bridge 3.5** now support explicit HOLD_X and RELEASE_X commands through the existing loopback PowerShell sender. The app adds **Hold X → Release via PowerShell** with a 100–2000 ms duration (default 750 ms), plus **Release X via PowerShell** for a physical held button. A hold test needs no physical X press, model or green detection. It disarms AI output before testing.

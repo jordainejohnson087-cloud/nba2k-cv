@@ -146,13 +146,16 @@ class GCVWorker:
                         # A release must never be dropped by tap cooldown, neutral
                         # callback or a concurrent arm transition.
                         if button=='RELEASE_X':command=3
+                        elif (button=='AI_HOLD_X' and not neutral and not command and armed
+                              and self.packet.get('trigger',{}).get('shot_mode')=='timing'
+                              and self.packet.get('status')=='absent' and now-self.last_test>=.8):command=5
                         elif (not neutral and not command and not armed and now-self.last_test>=.8
                               and button in ('A','X','HOLD_X')):
                             command={'A':1,'X':2,'HOLD_X':4}[button]
                 except (ValueError,UnicodeError):pass
         if command:
             self.last_test=now;self.test_reset=True
-            print('CONSOLE TEST: forwarding one '+{1:'A tap',2:'X tap',3:'X release',4:'X hold'}[command]+' to Titan; Xbox receipt unverified.',flush=True)
+            print('CONSOLE TEST: forwarding one '+{1:'A tap',2:'X tap',3:'X release',4:'X hold',5:'AI-timed X hold'}[command]+' to Titan; Xbox receipt unverified.',flush=True)
             return frame,bytearray((84,49,command))
         if neutral:return frame,bytearray((84,49,0))
         return frame, encode(self.packet, now-self.last_packet < STALE_SECONDS and

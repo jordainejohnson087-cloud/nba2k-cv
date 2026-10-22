@@ -1,4 +1,4 @@
-#pragma METAINFO("NBA2K CV Meter Bridge", 3, 5, "NBA2K CV")
+#pragma METAINFO("NBA2K CV Meter Bridge", 3, 6, "NBA2K CV")
 #include <PS4.gph>
 // X jumpshots only: physical X hold, then one observed-green X release.
 // Rhythm is deferred. No right-stick axes are rewritten.
@@ -36,49 +36,73 @@ uint32 test_counter;
 bool manual_packet;
 bool release_x;
 bool manual_hold_x;
+bool ai_hold_x;
+bool ai_timeout;
 uint16 manual_hold_age;
 uint8 gate_reason;
 uint16 gate_word;
 
 main {
     combo_run(Heartbeat);
+    if(packet_age < 1000) packet_age += elapsed_time();
     manual_packet = FALSE;
     if(gcv_ready()) {
         if(cv_byte(0) == 84 && cv_byte(1) == 49) manual_packet = TRUE;
     }
     if(manual_packet) {
-        // The proven manual A/X protocol, independent of AI/green gating.
-        armed = FALSE;
-        phase = 0;
-        blocked = TRUE;
-        shot_active = FALSE;
         test_command = cv_byte(2);
-        if(test_command != test_previous) {
-            if(test_command == 1) {
+        if(test_command != test_previous && test_command == 5) {
+            // Explicit app request: start one AI-timed X hold only after arming.
+            if(armed && shot_mode == 1 && packet_age <= 250 && !blocked
+                && !manual_hold_x && !release_x && !get_actual(BUTTON_17)) {
                 test_counter++;
-                test_button = 1;
-                combo_run(ConsoleTapA);
-            } else if(test_command == 2) {
-                test_counter++;
-                test_button = 2;
-                combo_run(ConsoleTapX);
-            } else if(test_command == 3) {
-                test_counter++;
-                test_button = 3;
-                manual_hold_x = FALSE;
-                release_x = TRUE;
-            } else if(test_command == 4) {
-                test_counter++;
-                test_button = 4;
+                test_button = 5;
                 manual_hold_x = TRUE;
+                ai_hold_x = TRUE;
+                ai_timeout = FALSE;
                 manual_hold_age = 0;
-                release_x = FALSE;
+                fired = FALSE;
+                shot_active = TRUE;
+                last_event = event_id;
+            }
+        } else if(test_command != 0 && test_command != 5) {
+            // Manual diagnostics disarm AI. Neutral callbacks must not cancel
+            // a hold that is waiting for an AI event.
+            armed = FALSE;
+            phase = 0;
+            blocked = TRUE;
+            shot_active = FALSE;
+            if(ai_hold_x) {
+                manual_hold_x = FALSE;
+                ai_hold_x = FALSE;
+                release_x = TRUE;
+            }
+            if(test_command != test_previous) {
+                if(test_command == 1) {
+                    test_counter++;
+                    test_button = 1;
+                    combo_run(ConsoleTapA);
+                } else if(test_command == 2) {
+                    test_counter++;
+                    test_button = 2;
+                    combo_run(ConsoleTapX);
+                } else if(test_command == 3) {
+                    test_counter++;
+                    test_button = 3;
+                    manual_hold_x = FALSE;
+                    release_x = TRUE;
+                } else if(test_command == 4) {
+                    test_counter++;
+                    test_button = 4;
+                    manual_hold_x = TRUE;
+                    manual_hold_age = 0;
+                    release_x = FALSE;
+                }
             }
         }
         test_previous = test_command;
     } else {
         if(gcv_ready()) test_previous = 0;
-        if(packet_age < 1000) packet_age += elapsed_time();
         if(gcv_ready()) {
             if(cv_byte(0) == 0 && cv_byte(1) == 77 && cv_byte(2) == 3) {
                 incoming_seq = ((uint32)cv_byte(19) << 24) | ((uint32)cv_byte(20) << 16)
@@ -104,7 +128,7 @@ main {
             } else { armed = FALSE; }
         }
         // Raw physical X, independent of any prior script output override.
-        holding = get_actual(BUTTON_17) > 0.0;
+        holding = get_actual(BUTTON_17) > 0.0 || ai_hold_x;
 
         // Explicit disarm or link timeout cancels new automated actions.
         // Disarm, 250 ms link loss, mode change require a release.
@@ -136,17 +160,26 @@ main {
                     fired = TRUE;
                     last_event = event_id;
                     fired_event = event_id;
+                    manual_hold_x = FALSE;
+                    ai_hold_x = FALSE;
                     release_x = TRUE;
                 }
     
             }
         }
     }
+    if(ai_hold_x && (!armed || packet_age > 250)) {
+        manual_hold_x = FALSE;
+        ai_hold_x = FALSE;
+        release_x = TRUE;
+    }
     // Explicit manual hold lasts until RELEASE_X, with a device-side limit
     // if PowerShell, GCV or the app stops before the release is delivered.
     if(manual_hold_x) {
         manual_hold_age += elapsed_time();
         if(manual_hold_age >= 2500) {
+            if(ai_hold_x) ai_timeout = TRUE;
+            ai_hold_x = FALSE;
             manual_hold_x = FALSE;
             release_x = TRUE;
         } else set_val(BUTTON_17, 100);
@@ -164,8 +197,10 @@ main {
     else if(release_x || fired) gate_reason = 8;
     else if(!green) gate_reason = 6;
     else if(packet_age > ttl) gate_reason = 7;
-    gate_word = gate_reason + 16 + 256 + 1024; // Timing + release + hold capabilities.
+    gate_word = gate_reason + 16 + 256 + 1024 + 2048; // Timing + release + hold capabilities.
     if(get_actual(BUTTON_17) > 0.0) gate_word += 512;
+    if(ai_hold_x) gate_word += 4096;
+    if(ai_timeout) gate_word += 8192;
 }
 
 combo Heartbeat {
