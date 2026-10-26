@@ -96,7 +96,7 @@ class BridgeClient:
         self.device_sequence = self.device_event = None
         self.active_slot = None
         self.worker_protocol = self.device_protocol = None
-        self.output_path=None;self.auto_release_event=None
+        self.output_path=None;self.auto_release_event=None;self.release_result=None
         self.device_gate=None;self.test_available=False;self.device_test_count=None;self.device_test_button=None
 
     def send(self, state, observed_at=None):
@@ -133,7 +133,9 @@ class BridgeClient:
                 self.worker_protocol=ack.get('worker_protocol')
                 self.device_protocol=ack.get('device_protocol')
                 self.test_available=ack.get('test_available') is True
-                self.output_path='console_release' if ack.get('output_path')=='console_release' else None
+                self.output_path=ack.get('output_path') if ack.get('output_path') in ('console_release','console_release_ack') else None
+                result=ack.get('release_result')
+                self.release_result=result if isinstance(result,dict) and result.get('state') in ('pending','sent','executed','rejected','canceled','timed_out') and type(result.get('event_id')) is int else None
                 for key in ('device_test_count','device_test_button','device_gate','auto_release_event'):
                     value=ack.get(key)
                     setattr(self,key,value if type(value) is int and 0<=value<=0xffffffff else None)
@@ -158,6 +160,7 @@ class BridgeClient:
         hardware = linked and self.last_hardware is not None and now-self.last_hardware < 1.5
         return dict(output_path=self.output_path if linked else None,
                     auto_release_event=self.auto_release_event if linked else None,
+                    release_result=dict(self.release_result) if linked and self.release_result else None,
                     device_gate=self.device_gate if hardware else None,
                     test_available=self.test_available if linked else False,
                     device_test_count=self.device_test_count if hardware else None,

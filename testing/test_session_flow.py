@@ -21,7 +21,7 @@ class SessionTests(unittest.TestCase):
             capture_active=True,live_active=True,active_out=out,preparing_bridge=False,
             trigger_armed=Variable(False),release_status=Variable(''),bridge_enabled=Variable(True),status=Variable(''),session_status=Variable(''),
             bridge_service=Mock(),_save=Mock(),_capture_ready=Mock(return_value=True),after=Mock(),_live=Mock())
-        ui.bridge_service.status.return_value=dict(ready=True,device_gate=272,output_path="console_release")
+        ui.bridge_service.status.return_value=dict(ready=True,device_gate=16656,output_path="console_release_ack")
         for name in ('_session_tick','_detector_status','_arming_blocker','_apply_green','_arm_shots','_disarm_shots','_shot_mode_changed'):
             setattr(ui,name,MethodType(getattr(Desktop,name),ui))
         ui._green_values=lambda:green_config(dict(armed=ui.trigger_armed.get()))
@@ -143,7 +143,7 @@ class AiShotLaunchTests(unittest.TestCase):
         import queue
         ui=SessionTests().ui(folder)
         ui.messages=queue.Queue();ui._export_bridge=Mock(return_value=folder)
-        ui.bridge_service.status.return_value.update(device_gate=3349,device_test_count=0,output_allowed=True)
+        ui.bridge_service.status.return_value.update(device_gate=19733,device_test_count=0,output_allowed=True)
         return ui
 
     def test_ai_shot_launch_arms_then_sends_one_powershell_start_without_timer(self):

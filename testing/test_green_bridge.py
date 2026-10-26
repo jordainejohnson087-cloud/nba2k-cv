@@ -37,18 +37,19 @@ class GreenBridgeTests(unittest.TestCase):
 
     def check_mode(self,mode,callback_interval=.005,pulse=False):
         with patch.object(gcv,'PORT',0):worker=gcv.GCVWorker(1920,1080)
-        payloads=[];stopped=threading.Event();sequence=0;event=0;counter=0;commands=0;button=0;errors=[]
-        def echo():return f'T2CV:{counter}:{sequence}:{event}:2:3:{commands}:{button}:272'
+        payloads=[];stopped=threading.Event();sequence=0;event=0;counter=0;commands=0;button=0;token=0;errors=[]
+        def echo():return f'T2CV:{counter}:{sequence}:{event}:2:3:{commands}:{button}:16656:{token}:{1 if token else 0}'
         def callbacks():
-            nonlocal sequence,event,counter,commands,button
+            nonlocal sequence,event,counter,commands,button,token
             try:
                 while not stopped.is_set():
                     _,data=worker.process(None);counter+=1
                     if len(data)==26:
                         sequence=int.from_bytes(data[19:23],'big')
                         self.assertEqual(data[5],0)
-                    elif data==bytes((84,49,3)):
-                        commands+=1;button=3
+                    elif data[:3]==bytes((84,50,3)):
+                        incoming=int.from_bytes(data[3:7],'big')
+                        commands+=int(incoming!=token);token=incoming
                     payloads.append(data)
                     stopped.wait(callback_interval)
             except Exception as exc:errors.append(exc)
@@ -74,14 +75,14 @@ class GreenBridgeTests(unittest.TestCase):
                         sdk.send(state,observed_at=captured)
                         if front==70:
                             self.assertFalse(measured['in_green'])
-                            self.assertFalse(any(len(p)==3 and p[2]==3 for p in payloads))
+                            self.assertFalse(any(len(p)==9 and p[2]==3 for p in payloads))
                     self.assertEqual(candidates,1)
                     if mode=='timing':
                         self.assertTrue(wait_for(lambda:commands==1),errors)
                         self.assertTrue(wait_for(lambda:service.status().get('auto_release_event')==1))
-                        self.assertTrue(wait_for(lambda:service.status().get('device_test_button')==3))
+                        self.assertTrue(wait_for(lambda:(service.status().get('release_result') or {}).get('state')=='executed'))
                         self.assertEqual(service.status().get('device_event'),0)
-                        self.assertEqual(service.status().get('output_path'),'console_release')
+                        self.assertEqual(service.status().get('output_path'),'console_release_ack')
                     else:
                         self.assertTrue(wait_for(lambda:any(len(p)==26 and p[4] for p in payloads)))
                         self.assertEqual(commands,0)

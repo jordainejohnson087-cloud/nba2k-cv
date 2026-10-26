@@ -991,7 +991,7 @@ class Desktop(tk.Tk):
         status=self.bridge_service.status() if self.bridge_service else {}
         gate=status.get('device_gate')
         if not blocked and (type(gate) is not int or not gate & 2048):
-            blocked='Install meter bridge 3.6 and restart gtuner_meter for AI X shots.'
+            blocked='Install meter bridge 3.7 and restart gtuner_meter for AI X shots.'
         if not blocked and (self._detector_status() or {}).get('status')!='absent':
             blocked='Wait for the current meter to disappear before starting an AI X shot.'
         if not blocked and gate & (512|4096):
@@ -1112,10 +1112,10 @@ class Desktop(tk.Tk):
         bridge=self.bridge_service.status()
         if not bridge.get('ready'):
             return 'Titan bridge is not ready: '+str(bridge.get('stage','connect and verify the bridge.'))
-        if bridge.get('output_path')!='console_release':
+        if bridge.get('output_path')!='console_release_ack':
             return 'Restart the updated gtuner_meter CV worker to use the tested console X-release path.'
-        if type(bridge.get('device_gate')) is not int or not (bridge['device_gate'] & 256):
-            return 'Install this app’s exported titan_meter.gpc, then restart its matching gtuner_meter worker.'
+        if type(bridge.get('device_gate')) is not int or not (bridge['device_gate'] & 16384):
+            return 'Install this app’s exported titan_meter.gpc 3.7 for identified release acknowledgments, then restart its matching gtuner_meter worker.'
         return None
 
     def _arm_shots(self):
@@ -1838,15 +1838,19 @@ class Desktop(tk.Tk):
                 measurement=data['green'];trigger=data.get('trigger',{})
                 gate=self.bridge_service.status().get('device_gate') if self.bridge_service else None
                 reasons={0:'ready',1:'disarmed',2:'link timeout',3:'R3 cancel held',4:'release X to reset',5:'waiting for physical hold',6:'waiting for green command',7:'green command expired',8:'shot action started'}
-                device_note=('Timing' if gate & 16 else 'Rhythm')+' / '+reasons.get(gate & 15,'unknown') if type(gate) is int else 'install X-only meter GPC 3.4'
+                device_note=('Timing' if gate & 16 else 'Rhythm')+' / '+reasons.get(gate & 15,'unknown') if type(gate) is int else 'install matching meter GPC 3.7'
                 if type(gate) is int:
                     device_note+=' / X input: '+('HELD' if gate & 512 else 'released')
                     if gate & 4096:device_note+=' / AI X HELD — waiting for fresh green'
                     elif gate & 8192:device_note+=' / AI X TIMEOUT — released without a green event'
+                release=(self.bridge_service.status().get('release_result') or {}) if self.bridge_service else {}
+                release_note=str(release.get('state','none'))+' / '+str(release.get('reason',''))
+                if release.get('late_ack'):release_note+=' / late device report: '+str(release.get('device_result'))
+                if release.get('ack_latency_ms') is not None:release_note+=f" / acknowledgment {release['ack_latency_ms']:.1f} ms"
                 self.green_status.set(f"{'ARMED' if trigger.get('armed') else 'DRY RUN'} | "
                     f"in green: {measurement.get('in_green',False)} | event {trigger.get('event_id',0)} | "
                     f"AI release sent {self.bridge_service.status().get('auto_release_event',0) if self.bridge_service else 0} | "
-                    f"Bridge command {self.bridge_service.status().get('device_test_button') if self.bridge_service else None} (3=X release) | {device_note} | "
+                    f"Device release {release_note} (Xbox unverified) | {device_note} | "
                     f"{measurement.get('reason','')}" + (' • STALE' if age>.25 else ''))
             if self.capture_active or (self.active_out/'live_bgr.bin').exists():return
             image=self.active_out/'preview.png'

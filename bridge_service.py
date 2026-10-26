@@ -46,6 +46,9 @@ def validate_bridge_state(state,stamp):
         raise ValueError('Invalid fill')
     trigger=state.get('trigger')
     if not isinstance(trigger,dict):raise ValueError('Trigger state required')
+    run=trigger.get('run_id')
+    if run is not None and (not isinstance(run,str) or len(run)!=32 or any(c not in '0123456789abcdef' for c in run)):
+        raise ValueError('Invalid detector run ID')
     for key in ('armed','green','valid','eligible'):
         if type(trigger.get(key)) is not bool:raise ValueError('Invalid trigger flag')
     for key,low,high in [('event_id',0,0xffffffff),('delay_ms',0,250),('hold_ms',10,500),('max_age_ms',25,250)]:
@@ -75,11 +78,11 @@ class TriggerLatch:
             self.pending=None;return
         if self.pending is not None:
             old=self.pending[0]['trigger']
-            if any(old.get(key,'rhythm')!=trigger.get(key,'rhythm') for key in ('shot_mode','direction','delay_ms','hold_ms','max_age_ms')):
+            if any(old.get(key,'rhythm')!=trigger.get(key,'rhythm') for key in ('run_id','shot_mode','direction','delay_ms','hold_ms','max_age_ms')):
                 self.pending=None
         if (state['status']=='detected' and trigger['valid'] and trigger['eligible'] and trigger['green'] and trigger['event_id']
-            and trigger['event_id']!=self.last_id):
-            self.last_id=trigger['event_id'];self.pending=(state,stamp)
+            and (trigger.get('run_id'),trigger['event_id'])!=self.last_id):
+            self.last_id=(trigger.get('run_id'),trigger['event_id']);self.pending=(state,stamp)
 
     def peek(self,now):
         if self.pending is not None:
@@ -98,7 +101,7 @@ class BridgeService:
         self.first_sequence=self.client.seq+1
         self.token=secrets.token_urlsafe(32)
         self.enabled=False;self.output_allowed=False;self.expected_slot=None
-        self.latest=None;self.error=None;self.events=TriggerLatch()
+        self.latest=None;self.error=None;self.events=TriggerLatch();self.last_release_log=None
         self.lock=threading.Lock();self.wake=threading.Event();self.stopped=threading.Event()
         owner=self
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -215,7 +218,14 @@ class BridgeService:
                 else:self.events.clear()
             if not (enabled and allowed and status['ready']):
                 state=dict(state,trigger=dict(state['trigger'],armed=False,eligible=False))
-            try:self.client.send(state,observed_at=stamp);self.error=None
+            try:
+                report=self.client.send(state,observed_at=stamp);self.error=None
+                result=report.get('release_result')
+                if result:
+                    key=(result.get('token'),result.get('state'),result.get('device_result'),result.get('late_ack'))
+                    if key!=self.last_release_log:
+                        self.last_release_log=key
+                        print('AI RELEASE STATUS (device output; Xbox unverified): '+json.dumps(result,sort_keys=True),flush=True)
             except OSError as exc:self.error=str(exc)
         try:self.client.send(neutral_bridge_state())
         except OSError:pass

@@ -1,4 +1,4 @@
-#pragma METAINFO("NBA2K CV Meter Bridge", 3, 6, "NBA2K CV")
+#pragma METAINFO("NBA2K CV Meter Bridge", 3, 7, "NBA2K CV")
 #include <PS4.gph>
 // X jumpshots only: physical X hold, then one observed-green X release.
 // Rhythm is deferred. No right-stick axes are rewritten.
@@ -41,15 +41,48 @@ bool ai_timeout;
 uint16 manual_hold_age;
 uint8 gate_reason;
 uint16 gate_word;
+bool auto_packet;
+bool auto_reply;
+uint32 incoming_token;
+uint32 release_token;
+uint16 release_lifetime;
+uint8 release_result; // 1 output executed, 2 unarmed/stale, 3 no eligible hold, 4 bad TTL.
 
 main {
     combo_run(Heartbeat);
     if(packet_age < 1000) packet_age += elapsed_time();
     manual_packet = FALSE;
+    auto_packet = FALSE;
+    auto_reply = FALSE;
     if(gcv_ready()) {
         if(cv_byte(0) == 84 && cv_byte(1) == 49) manual_packet = TRUE;
+        if(cv_byte(0) == 84 && cv_byte(1) == 50 && cv_byte(2) == 3) auto_packet = TRUE;
     }
-    if(manual_packet) {
+    if(auto_packet) {
+        incoming_token = ((uint32)cv_byte(3) << 24) | ((uint32)cv_byte(4) << 16)
+                       | ((uint32)cv_byte(5) << 8) | (uint32)cv_byte(6);
+        release_lifetime = ((uint16)cv_byte(7) << 8) | (uint16)cv_byte(8);
+        // The worker sends a measured-green release immediately, never a fixed
+        // shot delay. Repeated packets acknowledge the token without re-execution.
+        if(incoming_token != 0) {
+            auto_reply = TRUE;
+            if(incoming_token != release_token) {
+                release_token = incoming_token;
+                if(release_lifetime == 0 || release_lifetime > 250) release_result = 4;
+                else if(!armed || packet_age > 250 || shot_mode != 1) release_result = 2;
+                else if(blocked || fired || release_x || (!get_actual(BUTTON_17) && !ai_hold_x)) release_result = 3;
+                else {
+                    release_result = 1;
+                    fired = TRUE;
+                    last_event = event_id;
+                    shot_active = FALSE;
+                    manual_hold_x = FALSE;
+                    ai_hold_x = FALSE;
+                    release_x = TRUE;
+                }
+            }
+        }
+    } else if(manual_packet) {
         test_command = cv_byte(2);
         if(test_command != test_previous && test_command == 5) {
             // Explicit app request: start one AI-timed X hold only after arming.
@@ -197,15 +230,17 @@ main {
     else if(release_x || fired) gate_reason = 8;
     else if(!green) gate_reason = 6;
     else if(packet_age > ttl) gate_reason = 7;
-    gate_word = gate_reason + 16 + 256 + 1024 + 2048; // Timing + release + hold capabilities.
+    gate_word = gate_reason + 16 + 256 + 1024 + 2048 + 16384; // Timing + release + hold capabilities.
     if(get_actual(BUTTON_17) > 0.0) gate_word += 512;
     if(ai_hold_x) gate_word += 4096;
     if(ai_timeout) gate_word += 8192;
+    // Report only after the shared output clamp above has executed this tick.
+    if(auto_reply) printf("GCMD:ComputerVision.PY:T2CV:%d:%d:0:%d:3:%d:%d:%d:%d:%d", heartbeat_counter++, packet_seq, mslot_get(), test_counter, test_button, gate_word, release_token, release_result);
 }
 
 combo Heartbeat {
     wait(500);
-    printf("GCMD:ComputerVision.PY:T2CV:%d:%d:%d:%d:3:%d:%d:%d", heartbeat_counter++, packet_seq, fired_event, mslot_get(), test_counter, test_button, gate_word);
+    printf("GCMD:ComputerVision.PY:T2CV:%d:%d:0:%d:3:%d:%d:%d:%d:%d", heartbeat_counter++, packet_seq, mslot_get(), test_counter, test_button, gate_word, release_token, release_result);
 }
 
 // GPC2 gcv_read writes into a typed destination; it does not return a byte.

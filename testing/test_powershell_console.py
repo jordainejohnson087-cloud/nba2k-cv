@@ -20,28 +20,6 @@ ROOT=Path(__file__).resolve().parents[1]
 
 
 class ManualPathTests(unittest.TestCase):
-    def test_automatic_release_is_exact_manual_command_and_never_replays(self):
-        with patch.object(gcv,'PORT',0),patch.object(gcv,'TEST_PORT',0):worker=gcv.GCVWorker(1,1)
-        try:
-            with patch.dict(sys.modules,gtuner=SimpleNamespace(gpc_string=lambda:None)):
-                worker.packet=fixtures.ProtocolTests().packet()
-                worker.last_packet=time.monotonic()
-                worker.test_reset=True
-                self.assertEqual(worker.process(None)[1],bytes((84,49,3)))
-                self.assertEqual(worker.auto_release_event,42)
-                self.assertEqual(worker.process(None)[1],bytes((84,49,0)))
-                for _ in range(3):
-                    payload=worker.process(None)[1]
-                    self.assertEqual(len(payload),26);self.assertEqual(payload[5],0)
-                # Disarming and rearming the same event must not replay it.
-                worker.packet['trigger']['armed']=False;worker.process(None)
-                worker.packet['trigger']['armed']=True
-                self.assertEqual(len(worker.process(None)[1]),26)
-                worker.test_socket.sendto(('T2TEST:RELEASE_X:'+str(time.time())).encode(),
-                                         worker.test_socket.getsockname())
-                self.assertEqual(worker.process(None)[1],bytes((84,49,3)))
-        finally:worker.__del__()
-
     def test_automatic_release_rejects_noneligible_frames(self):
         for case in ('stale','predicted','unarmed','invalid','ineligible','rhythm','zero'):
             with self.subTest(case=case),patch.object(gcv,'PORT',0),patch.object(gcv,'TEST_PORT',0):

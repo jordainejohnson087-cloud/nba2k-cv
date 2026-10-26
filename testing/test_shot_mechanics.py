@@ -20,6 +20,7 @@ class ShotMechanicsTests(unittest.TestCase):
         root=Path(cls.folder.name)
         source=(Path(__file__).resolve().parents[1]/'bridge/titan_meter.gpc').read_text()
         source=re.sub(r'^#.*$', '', source, flags=re.M)
+        source=source.replace('printf(', 'device_report(')
         source=source.replace('main {','void tick() {').replace('    combo_run(Heartbeat);','')
         source=source.replace('combo_run(ConsoleTapA);','test_tap=16;').replace('combo_run(ConsoleTapX);','test_tap=17;')
         source=re.sub(r'combo (?:ConsoleTapA|ConsoleTapX) \{.*?\n\}', '', source, flags=re.S)
@@ -37,6 +38,8 @@ using int8=int8_t; using int16=int16_t;
 #define PS4_R3 6
 int test_tap=0; int actual[32], output[32], delta; bool fresh=true; uint8 bytes[26];
 int elapsed_time(){return delta;}
+int mslot_get(){return 2;}
+void device_report(const char*,...){}
 // GPC2 disallows implicit int/fix32 comparisons; C++ normally permits them.
 struct fix32 {
  double value;
@@ -69,12 +72,16 @@ int main(){
   for(int n=0;n<4;++n){bytes[11+n]=(event>>(24-8*n))&255;bytes[19+n]=(seq>>(24-8*n))&255;}
   bytes[23]=0;bytes[24]=lifetime;bytes[25]=mode;
   if(legacy){bytes[0]=84;bytes[1]=49;bytes[2]=legacy==3?0:legacy==4?3:legacy==5?4:legacy==6?5:legacy;}
+  if(legacy==7){bytes[0]=84;bytes[1]=50;bytes[2]=3;
+   for(int n=0;n<4;++n)bytes[3+n]=(event>>(24-8*n))&255;
+   bytes[7]=(lifetime>>8)&255;bytes[8]=lifetime&255;
+  }
   test_tap=0;
   for(int n=0;n<32;++n){actual[n]=0;output[n]=0;}
   actual[17]=x;actual[20]=ry;actual[6]=r3;actual[4]=70;actual[5]=40;
   for(int n=0;n<32;++n)output[n]=actual[n];
   tick();
-  std::cout<<output[17]<<" "<<output[20]<<" "<<output[4]<<" "<<output[5]<<" "<<int(phase)<<" "<<fired_event<<" "<<blocked<<" "<<test_counter<<" "<<int(test_button)<<" "<<test_tap<<" "<<gate_word<<"\\n";
+  std::cout<<output[17]<<" "<<output[20]<<" "<<output[4]<<" "<<output[5]<<" "<<int(phase)<<" "<<fired_event<<" "<<blocked<<" "<<test_counter<<" "<<int(test_button)<<" "<<test_tap<<" "<<gate_word<<" "<<release_token<<" "<<int(release_result)<<"\\n";
  }
 }
 '''
@@ -106,6 +113,30 @@ int main(){
         self.assertEqual(len(outputs),len(frames))
         self.assertTrue(all(row[2:4]==[70,40] for row in outputs),'RT and movement changed')
         return outputs
+
+    def test_100_identified_releases_with_duplicates_gaps_and_variable_holds(self):
+        frames=[];checks=[]
+        for event in range(1,101):
+            frames.extend([{},dict(x=100,dt=1+event%37),dict(x=100,deliver=0,dt=event%13+1)])
+            frames.append(dict(x=100,legacy=7,event=event));checks.append(len(frames)-1)
+            frames.extend([dict(x=100,legacy=7,event=event),dict(x=100),{},
+                           dict(x=100,legacy=7,event=event)])
+            # Replaying the old token after physical release cannot cancel a new hold.
+        out=self.run_frames(frames)
+        for index in checks:
+            self.assertEqual(out[index][0],0)
+            self.assertEqual(out[index][12],1)
+            self.assertEqual(out[index+1][0],0)
+            self.assertEqual(out[index+4][0],100)
+
+    def test_identified_release_rejects_early_release_disarm_and_expired_link(self):
+        for frames,reason in [([{},dict(x=100),{},dict(legacy=7,event=1)],3),
+                              ([{},dict(x=100,arm=0),dict(x=100,legacy=7,event=1)],2),
+                              ([{},dict(x=100),dict(x=100,deliver=0,dt=300),dict(x=100,legacy=7,event=1)],2),
+                              ([{},dict(x=100),dict(x=100,legacy=7,event=1,lifetime=0)],4)]:
+            out=self.run_frames(frames)
+            self.assertEqual(out[-1][12],reason)
+            self.assertEqual(out[-1][0],frames[-1].get('x',0))
 
     def test_slow_gcv_callbacks_do_not_latch_out_a_fresh_timing_event(self):
         frames=[dict(mode=1,lifetime=35)]
@@ -165,7 +196,7 @@ int main(){
         source=re.sub(r'combo (?:TapA|TapX) \{.*?\n\}', '', source, flags=re.S)
         source=re.sub(r'printf\([^;]+;', '', source)
         root=Path(self.folder.name);cpp=root/'standalone.cpp';binary=root/'standalone'
-        cpp.write_text(self.prelude+'int phase=0,fired_event=0,blocked=0,test_counter=0,test_button=0,gate_word=0;\n'+source+self.harness)
+        cpp.write_text(self.prelude+'int phase=0,fired_event=0,blocked=0,test_counter=0,test_button=0,gate_word=0,release_token=0,release_result=0;\n'+source+self.harness)
         result=subprocess.run([self.compiler,'-std=c++11',str(cpp),'-o',str(binary)],capture_output=True,text=True,timeout=30)
         self.assertEqual(result.returncode,0,result.stderr)
         from unittest.mock import patch
@@ -216,17 +247,18 @@ int main(){
                 gate=GreenGate(green_config(dict(armed=True,shot_mode='timing',max_age_ms=250)))
                 frames=[{},dict(x=100)] if physical else [{},dict(legacy=6),dict(legacy=3)]
                 try:
-                    with patch.dict(sys.modules,gtuner=SimpleNamespace(gpc_string=lambda:None)):
+                    with patch.dict(sys.modules,gtuner=SimpleNamespace(gpc_string=lambda:'T2CV:1:1:0:2:3:0:0:16656:0:0')):
                         for seq,front in enumerate((70,55,33),1):
                             image=fixture.frame(front=front);fill=estimate_fill(image,fixture.box)
                             measurement=measure_green(image,fixture.box,fill,gate.config)
                             stamp=time.time();state=dict(status='detected',confidence=.9,shot_id=1,fill=fill)
                             state['trigger']=gate.update(state,measurement,stamp)
-                            worker.packet=dict(state,sent_at=stamp,seq=seq);worker.last_packet=time.monotonic()
+                            worker.packet=dict(state,sent_at=stamp,seq=seq,session='f'*32);worker.last_packet=time.monotonic()
+                            worker.observe_event(worker.packet,worker.last_packet)
                             payload=worker.process(None)[1]
-                            if len(payload)==3:
-                                self.assertEqual(payload,bytes((84,49,3)))
-                                frames.append(dict(x=100 if physical else 0,legacy=4))
+                            if len(payload)==9:
+                                self.assertEqual(payload[:3],bytes((84,50,3)))
+                                frames.append(dict(x=100 if physical else 0,legacy=7,event=int.from_bytes(payload[3:7],'big')))
                             else:
                                 frames.append(dict(x=100 if physical else 0,arm=payload[4],seen=payload[3],green=payload[5],
                                     event=int.from_bytes(payload[11:15],'big'),lifetime=int.from_bytes(payload[23:25],'big')))
@@ -235,7 +267,7 @@ int main(){
                     self.assertTrue(all(row[0]==100 for row in out[1:-3]))
                     self.assertTrue(all(row[0]==0 for row in out[-3:]))
                     self.assertEqual(out[-1][5],0)  # Native green-action path was not used.
-                    self.assertEqual(out[-1][8],3)  # Actual GPC acknowledged tested RELEASE_X.
+                    self.assertEqual(out[-1][12],1)  # Actual GPC reports identified output execution.
                 finally:worker.__del__()
 
     def test_rhythm_mode_is_rejected_and_right_stick_never_changes(self):

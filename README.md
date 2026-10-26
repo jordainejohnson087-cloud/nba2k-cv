@@ -1,5 +1,16 @@
 # NBA 2K shot-meter CV pipeline
 
+## Identified AI X release and per-run event retention (2026102601)
+
+Phase 1 fixes two reproduced delivery failures: a green event being overwritten by a later UDP observation in the same Gtuner callback, and neutral telemetry resetting duplicate suppression. Detector run identities also prevent event 1 in a restarted run from colliding with the previous run. See [diagnosis, protocol and hardware verification](docs/ai_release_phase1.md).
+
+Manual PowerShell tests remain unchanged. Automatic release now carries a token to meter GPC **3.7**, which acknowledges that token after setting X output to zero or reports a rejection. Duplicate deliveries cannot execute twice; retries retain the original source deadline. The app shows event state/reason and acknowledgment latency, and backend logs retain terminal results while connected. Device output acknowledgment is not verified Xbox receipt.
+
+After updating, use **Open Bridge Files**, compile/install the exported **titan_meter.gpc 3.7**, select its slot and restart the matching **gtuner_meter.py**. The app prevents arming with the old script. Validate the manual test, dry-run measurements, then three explicitly armed physical-X shots before drawing gameplay conclusions. Existing settings/models/data remain in place.
+
+This release uses immediate fresh-observed-green timing. Predictive scheduling, calibrated end-to-end latency compensation, additional output backends, 120 FPS rendering and trained green-window upgrades remain later phases. No measured accuracy or physical hardware success is claimed.
+
+
 ## PowerShell launcher and observable Python backend (2026102211)
 
 The normal launcher now runs the full app through PowerShell using `.venv311\Scripts\python.exe -u`, retaining the terminal and exit errors instead of detaching pythonw. Python 3.11 remains the application/runtime backend. The app owns separate capture, CUDA detection and persistent console-host processes; PowerShell starts the console host and manual test commands. Capture and inference remain direct Python children so existing stop/cleanup behavior is preserved. No shell process is spawned on a green event.

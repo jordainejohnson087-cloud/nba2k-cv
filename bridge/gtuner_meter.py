@@ -9,6 +9,8 @@ import socket
 import struct
 import time
 import sys
+import secrets
+from collections import deque
 
 PORT = 26740
 TEST_PORT = 26741
@@ -80,6 +82,42 @@ class GCVWorker:
         self.device_gate = None
         self.auto_release_event = 0
         self.released_event = None
+        self.release=None;self.pending_release=None;self.event_highwater={}
+        self.next_token=secrets.randbelow(0x7fffffff)+1
+        self.retired_sessions=deque(maxlen=16)
+
+    def finish_release(self,state,reason,now):
+        if self.pending_release is None:return
+        self.pending_release.update(state=state,reason=reason,terminal_mono=now)
+        self.release=self.pending_release;self.pending_release=None
+        print('AI RELEASE RESULT: '+json.dumps(self.release,sort_keys=True),flush=True)
+
+    def observe_event(self,packet,now):
+        trigger=packet.get('trigger') or {}
+        identity=(packet['session'],trigger.get('run_id'))
+        if self.pending_release and (not trigger.get('armed') or trigger.get('shot_mode','timing')!='timing'
+                or identity!=self.pending_release['identity']):
+            self.finish_release('canceled','disarmed, mode changed, or detector restarted',now)
+        event=trigger.get('event_id',0)
+        if not event or event<=self.event_highwater.get(identity,0):return
+        if not (packet['status']=='detected' and trigger.get('armed') and trigger.get('green')
+                and trigger.get('valid') and trigger.get('eligible') and trigger.get('shot_mode','timing')=='timing'):return
+        self.event_highwater[identity]=event
+        # Bound run history. Neutral telemetry never resets deduplication.
+        if len(self.event_highwater)>64:del self.event_highwater[next(iter(self.event_highwater))]
+        if self.pending_release:self.finish_release('canceled','superseded by a new observed shot',now)
+        age=max(0,(time.time()-packet['sent_at'])*1000)
+        self.next_token=(self.next_token+1)&0x7fffffff or 1
+        self.pending_release=dict(identity=identity,event_id=event,token=self.next_token,state='pending',
+            reason='fresh observed green; immediate release policy',received_mono=now,
+            source_age_ms=age,deadline=now+(trigger['max_age_ms']-age-25)/1000,
+            sent_mono=None,ack_mono=None,attempts=0)
+        self.release=self.pending_release
+        if self.pending_release['deadline']<=now:self.finish_release('rejected','late observed event',now)
+
+    def release_result(self):
+        if not self.release:return None
+        return {k:v for k,v in self.release.items() if k not in ('identity','deadline')}
 
     def process(self, frame):
         import gtuner
@@ -94,13 +132,23 @@ class GCVWorker:
                 if text.startswith('T2CV:'):
                     parts=text[5:].strip().split(':')
                     counter = int(parts[0])
-                    if len(parts) in (3,4,5,7,8):
+                    if len(parts) in (3,4,5,7,8,10):
                         self.device_sequence=int(parts[1]);self.device_event=int(parts[2])
-                    self.active_slot=int(parts[3]) if len(parts) in (4,5,7,8) and 1<=int(parts[3])<=9 else None
-                    self.device_protocol=int(parts[4]) if len(parts) in (5,7,8) else None
-                    self.device_test_count=int(parts[5]) if len(parts) in (7,8) else None
-                    self.device_test_button=int(parts[6]) if len(parts) in (7,8) else None
-                    self.device_gate=int(parts[7]) if len(parts)==8 else None
+                    self.active_slot=int(parts[3]) if len(parts) in (4,5,7,8,10) and 1<=int(parts[3])<=9 else None
+                    self.device_protocol=int(parts[4]) if len(parts) in (5,7,8,10) else None
+                    self.device_test_count=int(parts[5]) if len(parts) in (7,8,10) else None
+                    self.device_test_button=int(parts[6]) if len(parts) in (7,8,10) else None
+                    self.device_gate=int(parts[7]) if len(parts) in (8,10) else None
+                    if len(parts)==10 and self.release:
+                        token,result=int(parts[8]),int(parts[9])
+                        if token==self.release['token'] and result in (1,2,3,4) and self.release.get('ack_mono') is None:
+                            self.release['ack_mono']=now
+                            self.release['device_result']={1:'executed',2:'rejected',3:'rejected',4:'rejected'}[result]
+                            self.release['device_reason']={1:'X output set to zero',2:'not armed or link stale',3:'physical X already released or shot blocked',4:'invalid lifetime'}[result]
+                            if self.release.get('sent_mono') is not None:
+                                self.release['ack_latency_ms']=(now-self.release['sent_mono'])*1000
+                            if self.pending_release:self.finish_release(self.release['device_result'],self.release['device_reason'],now)
+                            elif self.release['state'] in ('timed_out','canceled','rejected'):self.release['late_ack']=True
                     if counter != self.hardware_counter:
                         self.hardware_counter = counter
                         self.last_hardware = now
@@ -121,23 +169,21 @@ class GCVWorker:
                     or packet.get('status') not in ('absent','detected','predicted')):
                     continue
                 encode(packet, True)
+                if packet['session'] in self.retired_sessions:continue
                 if packet['session'] != self.session:
+                    if self.session:self.retired_sessions.append(self.session)
                     self.session = packet['session']
-                    self.released_event = None
-                    self.auto_release_event = 0
                     self.packet = {}
                 if packet['seq'] <= self.packet.get('seq',0):
                     continue
                 self.packet = packet
-                if packet.get('trigger',{}).get('event_id') == 0:
-                    self.released_event = None
-                    self.auto_release_event = 0
+                self.observe_event(packet,now)
                 if not self.packet_seen:
                     self.packet_seen=True
                     print('NBA2K CV bridge: valid app telemetry received; sending acknowledgments.',flush=True)
                 self.last_packet = now
                 ack = dict(session=packet['session'],seq=packet['seq'],worker_protocol=3,device_protocol=self.device_protocol,
-                    output_path='console_release',auto_release_event=self.auto_release_event,
+                    output_path='console_release_ack',auto_release_event=self.auto_release_event,release_result=self.release_result(),
                     device_gate=self.device_gate,test_available=self.test_socket is not None,device_test_count=self.device_test_count,device_test_button=self.device_test_button,
                     hardware_counter=self.hardware_counter,active_slot=self.active_slot,device_sequence=self.device_sequence,device_event=self.device_event,
                     hardware_age_ms=(now-self.last_hardware)*1000 if self.last_hardware is not None else None)
@@ -168,21 +214,27 @@ class GCVWorker:
                 except (ValueError,UnicodeError):pass
         payload=encode(self.packet, now-self.last_packet < STALE_SECONDS and
                        0<=time.time()-self.packet.get('sent_at',0)<=STALE_SECONDS)
-        automatic=False
-        if len(payload)==26:
-            event=int.from_bytes(payload[11:15],'big')
-            key=(self.session,event)
-            if payload[4] and payload[5] and payload[25]==1 and event and key!=self.released_event:
-                # The same RELEASE_X operation as the proven PowerShell test.
-                # Prioritize a release over neutral/hold callbacks; never replay it.
-                command=3;automatic=True
-                self.released_event=key;self.auto_release_event=event
-            # Native green-trigger mechanics are no longer an output path.
-            # Rhythm output is deferred; telemetry and arming still flow normally.
-            payload[5]=0
+        if len(payload)==26:payload[5]=0  # Only the identified command path may release.
+        if command and self.pending_release:
+            self.finish_release('canceled','manual command superseded AI release',now)
+        pending=self.pending_release
+        if pending:
+            if now>=pending['deadline']:
+                self.finish_release('timed_out','release acknowledgment missing before source deadline; execution unknown',now)
+            elif self.last_hardware is None or now-self.last_hardware>1.5:
+                self.finish_release('rejected','no live Titan heartbeat',now)
+            elif self.device_gate is None or not self.device_gate & 16384:
+                self.finish_release('rejected','install matching event-acknowledging Titan script',now)
+            else:
+                if pending['sent_mono'] is None:pending['sent_mono']=now
+                pending['state']='sent';pending['attempts']+=1
+                self.auto_release_event=pending['event_id']
+                # Same RELEASE_X operation, with an idempotent token envelope.
+                # Retry only within the original observation deadline.
+                lifetime=max(1,int((pending['deadline']-now)*1000))
+                return frame,bytearray(struct.pack('>BBBIH',84,50,3,pending['token'],lifetime))
         if command:
             self.last_test=now;self.test_reset=True
-            if automatic:print('AI RELEASE: event '+str(self.auto_release_event)+' -> tested RELEASE_X command; Xbox receipt unverified.',flush=True)
             print('CONSOLE TEST: forwarding one '+{1:'A tap',2:'X tap',3:'X release',4:'X hold',5:'AI-timed X hold'}[command]+' to Titan; Xbox receipt unverified.',flush=True)
             return frame,console_command(command)
         if neutral:return frame,console_command(0)

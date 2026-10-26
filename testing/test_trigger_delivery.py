@@ -51,3 +51,10 @@ class TriggerDeliveryTests(unittest.TestCase):
             state=packet();state['trigger'][flag]=False
             latch=TriggerLatch();latch.offer(state,10)
             self.assertIsNone(latch.peek(10.01))
+
+    def test_new_detector_run_reuses_event_number_without_losing_first_shot(self):
+        latch=TriggerLatch();first=packet(event=1);first['trigger']['run_id']='a'*32
+        latch.offer(first,10);latch.pop(10.01)
+        second=packet(event=1);second['trigger']['run_id']='b'*32
+        latch.offer(second,10.02)
+        self.assertEqual(latch.pop(10.03)[0]['trigger']['run_id'],'b'*32)

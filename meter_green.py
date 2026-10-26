@@ -4,6 +4,7 @@ This is a vertical white-fill/green-band heuristic, not a trained green detector
 Validate on raw gameplay before enabling controller output.
 """
 import math
+import uuid
 import time
 
 DEFAULT_GREEN = dict(armed=False, hue_low=35, hue_high=90, saturation_min=90,
@@ -66,6 +67,7 @@ def measure_green(frame, box, raw_fill, config, top_fraction=.04, bottom_fractio
 class GreenGate:
     def __init__(self, config):
         self.config=green_config(config)
+        self.run_id=uuid.uuid4().hex
         self.event=0
         self.latched=False
         self.approaching=False
@@ -97,7 +99,7 @@ class GreenGate:
         if candidate:
             self.event=(self.event+1)&0xffffffff or 1
             self.latched=True
-        return dict(version=3,shot_mode=cfg['shot_mode'],armed=cfg['armed'],green=inside,eligible=bool(inside and self.latched),
+        return dict(version=3,run_id=self.run_id,shot_mode=cfg['shot_mode'],armed=cfg['armed'],green=inside,eligible=bool(inside and self.latched),
             event_id=self.event,candidate=bool(candidate),valid=bool(valid),
             delay_ms=cfg['delay_ms'],hold_ms=cfg['hold_ms'],direction=cfg['direction'],
             max_age_ms=cfg['max_age_ms'])
